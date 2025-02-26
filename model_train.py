@@ -6,7 +6,7 @@ from torch.nn.functional import cross_entropy
 from torch.utils.data import DataLoader
 from numpy import vstack, argmax
 from param import Test_File_Path,Train_File_Path,TRAIN_BATCH_SIZE,TEST_BATCH_SIZE,Validation_File_Path,VALIDATION_BATCH_SIZE,EPOCHS
-from model import Transformer1
+import model
 class model_train(object):
     def __init__(self):
         pass
