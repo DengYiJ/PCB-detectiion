@@ -108,3 +108,66 @@ class FPN(nn.Module):
         p3 = self.smooth2(p3)
         p2 = self.smooth3(p2)
         return p2, p3, p4, p5
+
+class pyramid(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(pyramid, self).__init__()
+        self.conv_list = nn.ModuleList([nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+            for _ in range(5)])#为con_list添加5个conv2d
+
+        self.sequential = nn.Sequential(nn.Conv2d(in_channels, out_channels, 3, 1, 1, bias=False),)
+        self.relu = nn.ReLU(inplace=True)
+        self.me = MultiScaleEmbedding(in_channels, out_channels)  # 添加 MultiScaleEmbedding 模块
+        self.maxpool = nn.MaxPool2d(2, 2, 0)
+    def _umsample_add(self,x,y):
+        _, _, H, W = y.shape
+        #逐个元素相加
+        return F.upsample(x, size=(H, W), mode='bilinear') + y
+
+    def forward(self, features):
+        output=[]
+        for i,feature in enumerate(features):
+            x=self.conv_list[i](feature)
+            x=self.relu(x)
+            output.append(x)
+        #自上而下,横向链接
+        p5=output[5]
+        p4=self._umsample_add(p5,output[4])
+        p3=self._umsample_add(p4,output[3])
+        p2=self._umsample_add(p3,output[2])
+        p1=self._umsample_add(p2,output[1])
+
+        #卷积融合，平滑处理
+        p5=self.sequential(p5)
+        p4=self.sequential(p4)
+        p3=self.sequential(p3)
+        p2=self.sequential(p2)
+        p1=self.sequential(p1)
+
+        # MultiScaleEmbedding 操作
+        b1 = p1
+        b2 = self.me([p2, b1,output[1]])   # 在 b2 处进行 ME 操作并添加残差链接
+        b3 = self.me([p3, b2,output[2]])   # 在 b3 处进行 ME 操作并添加残差链接
+        b4 = self.me([p4, b3,output[3]])   # 在 b4 处进行 ME 操作并添加残差链接
+        b5 = self._umsample_add(p5, b4)  # 在 b5 处进行相加 操作
+        b6 = self.maxpool(b5)
+
+        feature_list=[b1,b2,b3,b4,b5,b6]
+        for i, feature in enumerate(feature_list):
+            print(f"b{i + 1} shape: {feature.shape}")
+
+        return  feature_list
+
+class MultiScaleEmbedding(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(MultiScaleEmbedding, self).__init__()
+        self.weights=nn.Parameter(torch.ones(3))# 假设每次 ME 操作有两个输入
+        self.normalize=nn.softmax(dim=0)
+        self.conv=nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x_list):
+        # x_list 是一个列表，包含3个输入特征图
+        weights = self.normalize(self.weights)  # 归一化权重
+        output = weights[0] * x_list[0] + weights[1] * x_list[1] +weights[2]*x_list[2] # 加权求和
+        output = self.conv(output)  # 通过 1x1 卷积调整通道数
+        return output

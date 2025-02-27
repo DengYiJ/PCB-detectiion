@@ -37,6 +37,6 @@ patch_embed = PatchEmbedding(img_size=(img_height, img_width), patch_size=patch_
 x = torch.randn(1, in_chans, img_height, img_width)
 
 # 前向传播
-x = patch_embed(x)  # [B, N, D]
+x = patch_embed(x)  # [B, N, D]#(batch_size, num_patches, embed_dim)
 
 print(x.shape)  # 输出形状

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 class FeedForward(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None,act_layer=nn.GELU, drop=0.):
+    def __init__(self, in_features, hidden_features=None, out_features=None,act_layer=nn.GELU, drop=0.5):
         super(FeedForward, self).__init__()
         self.in_features = in_features
         self.hidden_features = hidden_features or in_features

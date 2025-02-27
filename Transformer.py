@@ -1,5 +1,36 @@
-import torch
+import torch.nn.functional as F
 import torch.nn as nn
+#from torch.nn import GELU
+import numpy as np
+import torch
+class GELU(nn.Module):
+    def __init__(self):
+        super(GELU, self).__init__()
+
+    def forward(self, x):
+        return 0.5 * x * (1 + F.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * torch.pow(x, 3))))
+
+
+def drop_path(x, drop_prob: float = 0., training: bool = False):
+    if drop_prob == 0. or not training:
+        return x
+    keep_prob = 1 - drop_prob
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+    random_tensor.floor_()
+    output = x.div(keep_prob) * random_tensor
+    return output
+
+
+class DropPath(nn.Module):
+    def __init__(self, drop_prob=None):
+        super(DropPath, self).__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        return drop_path(x, self.drop_prob, self.training)
+
+
 class Attention(nn.Module):
     #特征向量长度，多头注意力头数，QKV偏置，注意力dropout比例，输出dropout比例
     def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
@@ -27,9 +58,8 @@ class Attention(nn.Module):
         return x  #返回最终的输出特征x，形状为 (B, N, C)
 
 
-import torch
 
-'''# 输入特征 (Batch size=2, Sequence length=10, Feature dimension=64)
+'''# 输入特征 (Batch size=2, Sequence length=10, Feature dimension=64)两批，序列长为10，特征维度为64
 x = torch.randn(2, 10, 64)
 
 # 创建注意力模块 (dim=64, num_heads=8)

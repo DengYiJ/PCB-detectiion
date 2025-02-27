@@ -1,31 +1,56 @@
 import torch
+#from mpmath.identification import transforms
+import torchvision.transforms as transforms
 from pandas.conftest import axis_1
 from pyglet import model
 from sklearn.metrics import accuracy_score
-from torch.nn.functional import cross_entropy
+from torch.nn.functional import cross_entropy, normalize
 from torch.utils.data import DataLoader
 from numpy import vstack, argmax
-from param import Test_File_Path,Train_File_Path,TRAIN_BATCH_SIZE,TEST_BATCH_SIZE,Validation_File_Path,VALIDATION_BATCH_SIZE,EPOCHS
+from param import root_dir,TRAIN_BATCH_SIZE,VALIDATION_BATCH_SIZE,EPOCHS
 import model
+import Dataset
+import LossFunc
 class model_train(object):
     def __init__(self):
         pass
     def train(self,model):
         #将训练数据集分为8：1：1的训练集，验证集，数据集
-        train=CSVDATASET(Train_File_Path)
-        validation=CSVDATASET(Validation_File_Path)   #通过方法，将验证集变为一个可以load的变量train
-        train_dl=DataLoader(train,batch_size=TRAIN_BATCH_SIZE,shuffle=True)
-        validation_dl=DataLoader(validation,batch_size=VALIDATION_BATCH_SIZE,shuffle=True)
+        train_transform = transforms.Compose([
+            transforms.Resize((224, 224)),  # 调整图片大小
+            transforms.ToTensor(),         # 转换为张量
+            transforms.Normalize(          # 标准化
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+            )
+            ])
 
-    #s使用adam优化
+        val_transform=transforms.Compose([
+            transforms.Resize((224,224)),
+           # transforms.RandomVerticleFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(  # 标准化
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+            )] )#(Validation_File_Path)
+        # 通过方法，将验证集变为一个可以load的变量train
+        train_dataset= Dataset.MyDataset(root_dir, transform=train_transform,train=True)
+        val_dataset= Dataset.MyDataset(root_dir, transform=val_transform,train=False)
+
+        train_dl=DataLoader(dataset=train_dataset,batch_size=TRAIN_BATCH_SIZE,shuffle=True)
+        validation_dl=DataLoader(dataset=val_dataset,batch_size=VALIDATION_BATCH_SIZE,shuffle=True)
+
+    #使用adam优化
         optimizer=torch.optim.Adam(model.parameters(),lr=1e-4)
         print('start training')
         for epochs in range(EPOCHS):
             for x_batch,y_batch in train_dl:
+                # x_batch: 图像张量 (batch_size, channels, height, width)
+                # y_batch: 标签张量 (batch_size, num_anchors, num_classes + 4)前 `num_classes` 列是分类标签（one-hot 编码），后 4 列是边界框标签。
                 y_batch=y_batch.long()
                 optimizer.zero_grad()
-                y_pre=model(x_batch)
-                loss=cross_entropy(y_pre,y_batch)
+                y_pre=model(x_batch)#`y_pre`：模型输出，形状为 `(batch_size, num_anchors, num_classes + 4)`。前 `num_classes` 列是分类预测。 后 4 列是边界框预测（`[x, y, w, h]`）。
+                loss=LossFunc.CustomLoss.forward(y_pre,y_batch)
                 loss.backward()
                 optimizer.step()#模型参数的更新体现在loss.backward()和optimizer.step()这两个步骤中。
 #loss.backward()计算梯度，optimizer.step()应用这些梯度来更新模型的参数。
@@ -53,10 +78,8 @@ class model_train(object):
 if __name__=='__main__':
     print("build model")
     #这里要写model.py的transformer函数，然后引import
-    model_transformer=Transformer1(nhead=10,             # number of heads in the multi-head-attention models
-                           dim_feedforward=128,  # dimension of the feedforward network model in nn.TransformerEncoder
-                           num_layers=1,
-                           dropout=0.0,
-                           classifier_dropout=0.3)
+    model_transformer=model.model(img_size,patch_size,in_channels,embed_dim,norm_layer,num_heads,
+                 Pyin_channels,Pyout_channels,
+                 Adin_channels,imgH,imgW,num_pic,M,Groups,ratio,WH)
     model1=model_train(model)#model_train类的实例化
     torch.save(model1,'model.pth')

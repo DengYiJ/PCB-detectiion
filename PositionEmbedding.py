@@ -1,7 +1,8 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-droprate=0.5
+from param import Droprate
+
 
 class PositionEmbedding(nn.Module):
     def __init__(self, input_size, output_size,num_features,num_patches):
@@ -23,7 +24,7 @@ class PositionEmbedding(nn.Module):
         #   此时生成的pos_Embedding的shape也为197, 768，代表每一个特征的位置信息。
         # --------------------------------------------------------------------------------------------------------------------#
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches+1, num_features))
-        self.pos_drop = nn.Dropout(p=droprate)
+        self.pos_drop = nn.Dropout(p=Droprate)
 
     def forward(self, x):
         x=self.PatchEmbedding(x)
