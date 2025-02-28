@@ -59,15 +59,15 @@ class Attention(nn.Module):
 
 
 
-'''# 输入特征 (Batch size=2, Sequence length=10, Feature dimension=64)两批，序列长为10，特征维度为64
-x = torch.randn(2, 10, 64)
-
+# 输入特征 (Batch size=2, Sequence length=10, Feature dimension=64)两批，序列长为10，特征维度为64
+x = torch.randn(4, 163, 768)
+dim=768
 # 创建注意力模块 (dim=64, num_heads=8)
-attn = Attention(dim=64, num_heads=8)
+attn = Attention(dim, num_heads=4)
 
 # 前向传播
 output = attn(x)
-print(output.shape)  # 输出: torch.Size([2, 10, 64])'''
+print(output.shape)  # 输出: torch.randn(4, 163, 768)
 
 class Mlp(nn.Module):
     """ MLP as used in Vision Transformer, MLP-Mixer and related networks机器语言程序

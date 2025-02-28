@@ -23,20 +23,20 @@ class PatchEmbedding(nn.Module):
         return x
 
 # 示例使用
-img_height = 1586
-img_width = 3034
-patch_size = 16
-in_chans = 3
+img_height = 1586 #1600 reshape后
+img_width = 3034  #3040
+patch_size = 160  #16→160
+in_chans = 3  #RGB三通道
 embed_dim = 768
-num_classes = 10
+#dataset return 了images，他的张量是（[4，3，224，224]）【4，3，1586，3034】
 
 # 创建 PatchEmbed 模块
 patch_embed = PatchEmbedding(img_size=(img_height, img_width), patch_size=patch_size, in_channels=in_chans, embed_dim=embed_dim)
 
 # 创建一个示例输入张量
-x = torch.randn(1, in_chans, img_height, img_width)
+x = torch.randn(4, in_chans, img_height, img_width)
 
 # 前向传播
 x = patch_embed(x)  # [B, N, D]#(batch_size, num_patches, embed_dim)
 
-print(x.shape)  # 输出形状
+print(x.shape)  # 输出形状，torch.Size([4, 18711, 768])→([4, 162, 768])

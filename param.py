@@ -5,7 +5,7 @@ ProjectDir = os.getcwd()#用于获取当前工作目录（Current Working Direct
 Train_File_Path = os.path.join(ProjectDir, 'train.csv')
 Test_File_Path = os.path.join(ProjectDir, 'test.csv')
 Validation_File_Path=os.path.join(ProjectDir, 'validation.csv')
-root_dir='D:\\MachineLearning\\GruaduationProject\\PCB_DATASET\\PCB_DATASET\\images'
+root_dir='D:\\MachineLearning\\GruaduationProject\\PCB_DATASET\\PCB_DATASET'
 # 预处理设置
 NUM_WORDS = 5500    #这里是词向量大小的数目
 PAD = '<PAD>'

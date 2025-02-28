@@ -115,34 +115,36 @@ class pyramid(nn.Module):
         self.conv_list = nn.ModuleList([nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
             for _ in range(5)])#为con_list添加5个conv2d
 
-        self.sequential = nn.Sequential(nn.Conv2d(in_channels, out_channels, 3, 1, 1, bias=False),)
+        self.sequential = nn.Sequential(nn.Conv2d(in_channels,out_channels, 3, 1, 1, bias=False),nn.ReLU(inplace=True))
+        self.smooth_cov = nn.Sequential(nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),nn.ReLU(inplace=True))
         self.relu = nn.ReLU(inplace=True)
         self.me = MultiScaleEmbedding(in_channels, out_channels)  # 添加 MultiScaleEmbedding 模块
         self.maxpool = nn.MaxPool2d(2, 2, 0)
     def _umsample_add(self,x,y):
         _, _, H, W = y.shape
         #逐个元素相加
-        return F.upsample(x, size=(H, W), mode='bilinear') + y
+        return F.interpolate(x, size=(H, W), mode='bilinear') + y
 
     def forward(self, features):
         output=[]
-        for i,feature in enumerate(features):
-            x=self.conv_list[i](feature)
+        for feature in features:
+            x=self.sequential(feature)
             x=self.relu(x)
             output.append(x)
+
         #自上而下,横向链接
-        p5=output[5]
-        p4=self._umsample_add(p5,output[4])
-        p3=self._umsample_add(p4,output[3])
-        p2=self._umsample_add(p3,output[2])
-        p1=self._umsample_add(p2,output[1])
+        p5=output[4]
+        p4=self._umsample_add(p5,output[3])
+        p3=self._umsample_add(p4,output[2])
+        p2=self._umsample_add(p3,output[1])
+        p1=self._umsample_add(p2,output[0])
 
         #卷积融合，平滑处理
-        p5=self.sequential(p5)
-        p4=self.sequential(p4)
-        p3=self.sequential(p3)
-        p2=self.sequential(p2)
-        p1=self.sequential(p1)
+        p5=self.smooth_cov(p5)
+        p4=self.smooth_cov(p4)
+        p3=self.smooth_cov(p3)
+        p2=self.smooth_cov(p2)
+        p1=self.smooth_cov(p1)
 
         # MultiScaleEmbedding 操作
         b1 = p1
@@ -162,7 +164,7 @@ class MultiScaleEmbedding(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(MultiScaleEmbedding, self).__init__()
         self.weights=nn.Parameter(torch.ones(3))# 假设每次 ME 操作有两个输入
-        self.normalize=nn.softmax(dim=0)
+        self.normalize=nn.Softmax(dim=0)
         self.conv=nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x_list):
@@ -171,3 +173,28 @@ class MultiScaleEmbedding(nn.Module):
         output = weights[0] * x_list[0] + weights[1] * x_list[1] +weights[2]*x_list[2] # 加权求和
         output = self.conv(output)  # 通过 1x1 卷积调整通道数
         return output
+
+#需要测试金字塔的输入输出，写一个例程，输入是一个list包含5个张量(B,D,H,W)
+# 测试代码
+if __name__ == "__main__":
+    # 设置超参数
+    B = 2  # 批处理大小
+    D = 3  # 输入通道数（in_channels）
+    H = W = 4  # 特征图的高度和宽度
+    in_channels = D
+    out_channels = 6  # 输出通道数
+
+    # 生成随机输入特征图列表
+    features = []
+    for _ in range(5):
+        feature = torch.randn(B, D, H, W)  # (B, D, H, W)
+        features.append(feature)
+    print(features)
+    # 初始化金字塔模块
+    pyramid_model = pyramid(in_channels, out_channels)
+
+    # 测试前向传播
+    output_features = pyramid_model(features)
+
+    # 检查输出是否正确
+    print("测试完成！")

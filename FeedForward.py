@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-class FeedForward(nn.Module):
+class FeedForward(nn.Module):#in_features就是embed_dim 768,attention输出torch.randn(4, 163, 768)
     def __init__(self, in_features, hidden_features=None, out_features=None,act_layer=nn.GELU, drop=0.5):
         super(FeedForward, self).__init__()
         self.in_features = in_features
@@ -21,3 +21,11 @@ class FeedForward(nn.Module):
         x = self.fc2(x)
         x = self.drop2(x)
         return x
+
+output=torch.randn(4,163,768)
+# 创建 FeedForward 层
+ff = FeedForward(in_features=768, hidden_features=2048, out_features=768)
+
+# 前向传播
+ff_output = ff(output)
+print(ff_output.shape)  # 输出: torch.Size([4, 163, 768])

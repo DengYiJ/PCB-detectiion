@@ -76,10 +76,10 @@ class model_train(object):
             return acc
 
 if __name__=='__main__':
-    print("build model")
+    print("build model")#imghimgw是1600x3040，inchannel是3，patchsize是160，embeddim是768
     #这里要写model.py的transformer函数，然后引import
-    model_transformer=model.model(img_size,patch_size,in_channels,embed_dim,norm_layer,num_heads,
-                 Pyin_channels,Pyout_channels,
+    model_transformer=model.model(img_size=(1600,3040),patch_size=160,in_channels=3,embed_dim=768,norm_layer=None,num_heads=4,
+                 imgH=1600,imgW=3400,Pyin_channels=768,Pyout_channels=256,
                  Adin_channels,imgH,imgW,num_pic,M,Groups,ratio,WH)
     model1=model_train(model)#model_train类的实例化
     torch.save(model1,'model.pth')

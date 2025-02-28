@@ -1,70 +1,146 @@
-import torch
 import os
+import torch
+import xml.etree.ElementTree as ET
+from torchvision import transforms
 from PIL import Image
-from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
-import torchvision.transforms as transforms
-
-class MyDataset(Dataset):#train:布尔值，指定是加载训练集 (True) 还是测试集 (False);test_size：测试集的比例，默认为 0.1667（即 1/6）;random_state：随机种子，用于保证划分结果的可复现性。
-    def __init__(self, root_dir, transform=None, train=True, test_size=0.1667, random_state=42):
+from torch.utils.data import Dataset, DataLoader
+import param
+class MyDataset(Dataset):#transform=True表示进行变换，会把他变成张量
+    def __init__(self, root_dir, transform=None, train=True, test_size=0.1667, random_state=42, num_anchors=9, num_classes=6):
         super(MyDataset, self).__init__()
-        self.root_dir = root_dir  # 根目录
+        self.root_dir = root_dir
         self.transform = transform
-        self.train = train  # 是否是训练集
-        self.test_size = test_size  # 测试集比例（1/6 ≈ 0.1667）
-        self.random_state = random_state  # 随机种子，保证划分结果可复现
+        self.train = train
+        self.test_size = test_size
+        self.random_state = random_state
+        self.num_anchors = num_anchors
+        self.num_classes = num_classes  # 类别数，假设共有 6 个类别
 
-        # 获取所有类别文件夹
-        self.classes = sorted(os.listdir(root_dir))  # 按字母顺序排序
-        self.class_to_idx = {cls_name: idx for idx, cls_name in enumerate(self.classes)}  # 类别到索引的映射
+        # 假设 XML 文件存储在 Annotations 文件夹中，图片存储在 JPEGImages 文件夹中
+        self.annotations_dir = os.path.join(root_dir, 'Annotations')
+        self.images_dir = os.path.join(root_dir, 'images')
 
-        # 获取所有图片路径和对应的标签
-        all_img_paths = []
-        all_labels = []
-        for idx, cls_name in enumerate(self.classes):
-            cls_dir = os.path.join(root_dir, cls_name)  # 类别文件夹路径
-            if os.path.isdir(cls_dir):  # 确保是文件夹
-                for img_name in os.listdir(cls_dir):
-                    img_path = os.path.join(cls_dir, img_name)  # 图片路径
-                    all_img_paths.append(img_path)
-                    all_labels.append(idx)  # 标签是类别索引
+        # 获取所有 XML 文件路径（递归遍历子文件夹）
+        self.all_xml_paths = []
+        for root, dirs, files in os.walk(self.annotations_dir):
+            for file in files:
+                if file.endswith('.xml'):
+                    self.all_xml_paths.append(os.path.join(root, file))
+
+        # 获取对应的图像路径
+        self.all_img_paths = []
+        for xml_path in self.all_xml_paths:
+            # 提取文件名，不包括路径和扩展名
+            file_name = os.path.splitext(os.path.basename(xml_path))[0]
+            # 构建对应图像路径
+            img_sub_dir = os.path.relpath(os.path.dirname(xml_path), self.annotations_dir)
+            img_path = os.path.join(self.images_dir, img_sub_dir, f"{file_name}.jpg")
+            self.all_img_paths.append(img_path)
+
+        # 过滤掉不存在的图像路径
+        valid_indices = [i for i, path in enumerate(self.all_img_paths) if os.path.exists(path)]
+        self.all_xml_paths = [self.all_xml_paths[i] for i in valid_indices]
+        self.all_img_paths = [self.all_img_paths[i] for i in valid_indices]
 
         # 划分为训练集和测试集
-        X_train, X_test, y_train, y_test = train_test_split(
-            all_img_paths, all_labels, test_size=self.test_size, random_state=self.random_state, stratify=all_labels
-        )
-
-        # 如果是训练集，使用训练数据；如果是测试集，使用测试数据
-        if  self.train:
-            self.img_list= X_train
-            self.labels= y_train
+        if self.train:
+            self.img_list, _, self.xml_list, _ = train_test_split(
+                self.all_img_paths, self.all_xml_paths, test_size=self.test_size, random_state=self.random_state
+            )
         else:
-            self.img_list= X_test
-            self.labels= y_test
-
+            _, self.img_list, _, self.xml_list = train_test_split(
+                self.all_img_paths, self.all_xml_paths, test_size=self.test_size, random_state=self.random_state
+            )
 
     def __len__(self):
         return len(self.img_list)
 
     def __getitem__(self, item):
         img_path = self.img_list[item]
-        label = self.labels[item]
+        xml_path = self.xml_list[item]
 
         # 打开图像
         image = Image.open(img_path).convert('RGB')
 
+        # 解析 XML 文件，获取目标信息
+        objects = self.parse_xml(xml_path)
+
+        # 转换为目标检测模型的输入格式
+        y_batch = self.convert_to_model_input(objects)
+
         # 应用变换
         if self.transform is not None:
             image = self.transform(image)
+        #y_batch = torch.zeros(1, 9, 10)
+        #y_batch[0, 0, :] = [1.0, 0, 0, 0, 0, 0, 2459, 1274, 2530, 1329]
+        # y_batch[0, 1, :] = [1.0, 0, 0, 0, 0, 0, 1613, 334, 1679, 396]
+        # y_batch[0, 2, :] = [1.0, 0, 0, 0, 0, 0, 1726, 794, 1797, 854]
+        #第一0是batch中第几个，这里初始化的是每轮1个，也就是第一个；如果是每轮4个处理，那就是4个图片中的第一张。第二个是9个锚框，数量自己设计；第三个10是6（类别概率）+4（边界框）
+        return image, y_batch
 
-        # 将标签转换为张量
-        label = torch.tensor(label, dtype=torch.long)
+    def parse_xml(self, xml_path):
+        # 解析 XML 文件，提取目标信息
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
 
-        return image, label
-#
-#定义数据增强和预处理操作
+        objects = []
+        for obj in root.findall('object'):
+            name = obj.find('name').text  # 类别名称
+            bndbox = obj.find('bndbox')
+            xmin = int(bndbox.find('xmin').text)
+            ymin = int(bndbox.find('ymin').text)
+            xmax = int(bndbox.find('xmax').text)
+            ymax = int(bndbox.find('ymax').text)
+            objects.append({
+                'name': name,
+                'bbox': [xmin, ymin, xmax, ymax]
+            })
+        return objects
+
+    def convert_to_model_input(self, objects):
+        # 将目标信息转换为模型的输入格式（`y_batch`）
+        # 假设模型使用锚框（anchors）预测目标，每个锚框包含类别和边界框
+        # 这里我们生成一个标签张量，形状为 (1, num_anchors, num_classes + 4)
+        # 其中，num_anchors 是锚框的数量，num_classes 是类别数
+
+        name_to_index = {
+            'missing_hole': 0,
+            'mouse_bite': 1,
+            'open_circuit': 2,
+            'short': 3,
+            'spur': 4,
+            'spurious_copper': 5
+            # 添加其他类别
+        }
+
+        # 初始化标签张量
+        y_batch = torch.zeros(( self.num_anchors, self.num_classes + 4))  # batch_size=1
+
+        print(f"Processing objects: {objects}")  # 调试信息
+        # 填充标签
+        for i, obj in enumerate(objects):
+            if i >= self.num_anchors:
+                break  # 超过锚框数量，停止填充
+
+            name = obj['name']
+            bbox = obj['bbox']
+
+            # 设置分类标签（one-hot 编码）
+            class_idx = name_to_index.get(name, self.num_classes)  # 默认是最末尾的索引
+            print(f"Object {i}: name={name}, class_idx={class_idx}")  # 调试信息
+
+            if class_idx < self.num_classes:
+                y_batch[ i, class_idx] = 1.0  # 类别概率
+
+            # 设置边界框坐标
+            y_batch[i, self.num_classes:] = torch.tensor(bbox)  # [xmin, ymin, xmax, ymax]
+
+        return y_batch
+
+# 定义数据增强和预处理操作
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),  # 调整图片大小
+    transforms.Resize((3040, 1600)),  # 调整图片大小
     transforms.ToTensor(),         # 转换为张量
     transforms.Normalize(          # 标准化
         mean=[0.485, 0.456, 0.406],
@@ -72,16 +148,18 @@ transform = transforms.Compose([
     )
 ])
 
-# 创建数据集实例,创建训练集
-dataset = MyDataset(root_dir='D:\\MachineLearning\\GruaduationProject\\PCB_DATASET\\PCB_DATASET\\images', transform=transform,train=True)
 
-# 创建测试集
-'''test_dataset = MyDataset(root_dir=r'D:\MachineLearning\GruaduationProject\PCB_DATASET\PCB_DATASET\images',
-                         transform=transform, train=False)'''
+# 创建数据集实例,返回的image是通过transform的一个张量
+dataset = MyDataset(root_dir=param.root_dir, transform=transform, train=True)
+
 # 创建数据加载器
-from torch.utils.data import DataLoader
-dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+data_loader = DataLoader(dataset, batch_size=1, shuffle=True)
 
-for images, labels in dataloader:
-    print(images.shape)  # 输出：torch.Size([batch_size, 3, 224, 224])第一维表示批量大小（4）。第二维表示通道数（3）。最后两维表示图像的高度和宽度（224x224）。
-    print(labels.shape)  # 输出：torch.Size([batch_size])
+# 获取一个批次的数据并输出 y_batch 的细节
+
+#下面适用于转换为张量的情况
+for images, y_batch in data_loader:
+    print("Image shape:", images.shape)  # 输出图像的形状，Image shape: torch.Size([1, 3, 3040, 1600])
+   # print("y_batch shape:", y_batch.shape)  # 输出 y_batch 的形状
+    #print("y_batch content:", y_batch)  # 输出 y_batch 的内容
+    break  # 只获取一个批次的数据
