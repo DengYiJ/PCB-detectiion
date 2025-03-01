@@ -117,7 +117,7 @@ class MyDataset(Dataset):#transform=True表示进行变换，会把他变成张�
         # 初始化标签张量
         y_batch = torch.zeros(( self.num_anchors, self.num_classes + 4))  # batch_size=1
 
-        print(f"Processing objects: {objects}")  # 调试信息
+        #print(f"Processing objects: {objects}")  # 调试信息
         # 填充标签
         for i, obj in enumerate(objects):
             if i >= self.num_anchors:
@@ -128,7 +128,7 @@ class MyDataset(Dataset):#transform=True表示进行变换，会把他变成张�
 
             # 设置分类标签（one-hot 编码）
             class_idx = name_to_index.get(name, self.num_classes)  # 默认是最末尾的索引
-            print(f"Object {i}: name={name}, class_idx={class_idx}")  # 调试信息
+            #print(f"Object {i}: name={name}, class_idx={class_idx}")  # 调试信息
 
             if class_idx < self.num_classes:
                 y_batch[ i, class_idx] = 1.0  # 类别概率
@@ -138,28 +138,34 @@ class MyDataset(Dataset):#transform=True表示进行变换，会把他变成张�
 
         return y_batch
 
-# 定义数据增强和预处理操作
-transform = transforms.Compose([
-    transforms.Resize((3040, 1600)),  # 调整图片大小
-    transforms.ToTensor(),         # 转换为张量
-    transforms.Normalize(          # 标准化
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
-])
+
+#测试用例
+def test_Dataset():
+    # 定义数据增强和预处理操作
+    transform = transforms.Compose([
+        transforms.Resize((3040, 1600)),  # 调整图片大小
+        transforms.ToTensor(),  # 转换为张量
+        transforms.Normalize(  # 标准化
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+
+    # 创建数据集实例,返回的image是通过transform的一个张量
+    dataset = MyDataset(root_dir=param.root_dir, transform=transform, train=True)
+
+    # 创建数据加载器
+    data_loader = DataLoader(dataset, batch_size=1, shuffle=True)
+
+    # 获取一个批次的数据并输出 y_batch 的细节
+
+    # 下面适用于转换为张量的情况
+    for images, y_batch in data_loader:
+        print("Image shape:", images.shape)  # 输出图像的形状，Image shape: torch.Size([1, 3, 3040, 1600])
+        # print("y_batch shape:", y_batch.shape)  # 输出 y_batch 的形状
+        # print("y_batch content:", y_batch)  # 输出 y_batch 的内容
+        break  # 只获取一个批次的数据
 
 
-# 创建数据集实例,返回的image是通过transform的一个张量
-dataset = MyDataset(root_dir=param.root_dir, transform=transform, train=True)
-
-# 创建数据加载器
-data_loader = DataLoader(dataset, batch_size=1, shuffle=True)
-
-# 获取一个批次的数据并输出 y_batch 的细节
-
-#下面适用于转换为张量的情况
-for images, y_batch in data_loader:
-    print("Image shape:", images.shape)  # 输出图像的形状，Image shape: torch.Size([1, 3, 3040, 1600])
-   # print("y_batch shape:", y_batch.shape)  # 输出 y_batch 的形状
-    #print("y_batch content:", y_batch)  # 输出 y_batch 的内容
-    break  # 只获取一个批次的数据
+if __name__ == "__main__":
+    test_Dataset()

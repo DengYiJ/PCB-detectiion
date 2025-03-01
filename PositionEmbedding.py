@@ -66,21 +66,21 @@ class PositionEmbeddingStatic(nn.Module):#num_features是序列长度18711，num
         x = x + pos_embed
         # 应用 Dropout
         x = self.pos_drop(x)
+        print(f"PositionEmbedding output shape: {x.shape}")
         return x
 
-# 创建一个示例输入张量
-#x = torch.randn(4, 18711,768)
-# 示例输入
-x = torch.randn(4, 162, 768)
+def test_PositionEm():
+    x = torch.randn(4, 162, 768)
 
-# 创建 PositionEmbedding 模块
-num_patches = x.shape[1]  # 18711  162
-num_features = x.shape[2] # 768   768
-#pos_embed = PositionEmbeddingDynamic(imgH=1600,imgW=3040,num_features=num_features, num_patches=num_patches,patch_size=190)
-pos_embed = PositionEmbeddingStatic(num_features=num_features, num_patches=num_patches)
-# 前向传播
-output = pos_embed(x)
-print(f"Position Embedding Output Shape: {output.shape}")  # static输出torch.Size([4, 163, 768])成功
+    # 创建 PositionEmbedding 模块
+    num_patches = x.shape[1]  # 18711  162
+    num_features = x.shape[2]  # 768   768
+    # pos_embed = PositionEmbeddingDynamic(imgH=1600,imgW=3040,num_features=num_features, num_patches=num_patches,patch_size=190)
+    pos_embed = PositionEmbeddingStatic(num_features=num_features, num_patches=num_patches)
+    # 前向传播
+    output = pos_embed(x)
+    print(f"Position Embedding Output Shape: {output.shape}")  # static输出torch.Size([4, 163, 768])成功
 
 
-
+if __name__ == "__main__":
+    test_PositionEm()

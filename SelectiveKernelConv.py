@@ -3,7 +3,7 @@ import torch
 from torch import nn
 
 
-# conv = SKConv(64, 32, 3, 8, 2)
+# conv = SKConv(64, 32, 3, 8, 2)   output:`[batch_size, features, H, W]`。
 class SKConv(nn.Module):
     def __init__(self, features, WH, M, G, r, stride=1, L=32):
         """ Constructor
@@ -156,14 +156,33 @@ class SKNet(nn.Module):
         return fea
 
 
-if __name__ == '__main__':
-    # 随机生成8个（64，32，32）的特征图
-    x = torch.rand(8, 64, 32, 32)
-    conv = SKConv(64, 32, 3, 8, 2)
-    out = conv(x)
-    criterion = nn.L1Loss()
-    loss = criterion(out, x)
-    loss.backward()
-    # 最终输出特征图V的size和损失值
-    print('out shape : {}'.format(out.shape))
-    print('loss value : {}'.format(loss))
+# 测试用例
+    def test_skconv():
+    # 设置超参数
+        batch_size = 2
+        channels = 4
+        height = 8
+        width = 8
+        WH = 8
+        M = 2
+        G = 2
+        r = 2
+        stride = 1
+        L = 32
+
+    # 输入张量
+        x = torch.randn(batch_size, channels, height, width)
+
+    # 初始化 SKConv 模块
+        skconv = SKConv(features=channels, WH=WH, M=M, G=G, r=r, stride=stride, L=L)
+
+    # 前向传播
+        output = skconv(x)
+
+    # 验证输出形状
+        expected_output_shape = (batch_size, channels, height, width)
+        assert output.shape == expected_output_shape, f"输出形状不匹配，期望 {expected_output_shape}，实际 {output.shape}"
+
+        print("SKConv 测试通过！")
+
+    #test_skconv()

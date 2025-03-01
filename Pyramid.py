@@ -31,13 +31,12 @@ class Bottleneck(nn.Module):
         out = self.relu(out)
         return out
 
-
-class FPN(nn.Module):
-    '''
+'''
+#class FPN(nn.Module):
+    
     FPN需要初始化一个list，代表ResNet每一个阶段的Bottleneck的数量
-    '''
-
-    def __init__(self, layers):
+    
+        def __init__(self, layers):
         super(FPN, self).__init__()
         # 构建C1
         self.inplanes = 64
@@ -107,7 +106,7 @@ class FPN(nn.Module):
         p4 = self.smooth1(p4)
         p3 = self.smooth2(p3)
         p2 = self.smooth3(p2)
-        return p2, p3, p4, p5
+        return p2, p3, p4, p5'''
 
 class pyramid(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -118,7 +117,7 @@ class pyramid(nn.Module):
         self.sequential = nn.Sequential(nn.Conv2d(in_channels,out_channels, 3, 1, 1, bias=False),nn.ReLU(inplace=True))
         self.smooth_cov = nn.Sequential(nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),nn.ReLU(inplace=True))
         self.relu = nn.ReLU(inplace=True)
-        self.me = MultiScaleEmbedding(in_channels, out_channels)  # 添加 MultiScaleEmbedding 模块
+        self.me = MultiScaleEmbedding(out_channels, out_channels)  # 添加 MultiScaleEmbedding 模块
         self.maxpool = nn.MaxPool2d(2, 2, 0)
     def _umsample_add(self,x,y):
         _, _, H, W = y.shape
@@ -145,7 +144,7 @@ class pyramid(nn.Module):
         p3=self.smooth_cov(p3)
         p2=self.smooth_cov(p2)
         p1=self.smooth_cov(p1)
-
+        #out_channels = 6
         # MultiScaleEmbedding 操作
         b1 = p1
         b2 = self.me([p2, b1,output[1]])   # 在 b2 处进行 ME 操作并添加残差链接
@@ -158,7 +157,7 @@ class pyramid(nn.Module):
         for i, feature in enumerate(feature_list):
             print(f"b{i + 1} shape: {feature.shape}")
 
-        return  feature_list
+        return  feature_list #返回一个带有5个(B,D,H,W)的list，输出的D为经过me卷积，等于me的outchannels6
 
 class MultiScaleEmbedding(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -183,11 +182,12 @@ if __name__ == "__main__":
     H = W = 4  # 特征图的高度和宽度
     in_channels = D
     out_channels = 6  # 输出通道数
-
+    MEin_channels=out_channels
+    MEout_channels=out_channels
     # 生成随机输入特征图列表
     features = []
     for _ in range(5):
-        feature = torch.randn(B, D, H, W)  # (B, D, H, W)
+        feature = torch.randn(B, D, H, W)  # 输入带有5个(B, D, H, W)的list
         features.append(feature)
     print(features)
     # 初始化金字塔模块
@@ -198,3 +198,9 @@ if __name__ == "__main__":
 
     # 检查输出是否正确
     print("测试完成！")
+'''output:b1 shape: torch.Size([2, 6, 4, 4])
+          b2 shape: torch.Size([2, 6, 4, 4])
+          b3 shape: torch.Size([2, 6, 4, 4])
+          b4 shape: torch.Size([2, 6, 4, 4])
+          b5 shape: torch.Size([2, 6, 4, 4])
+          b6 shape: torch.Size([2, 6, 2, 2])'''

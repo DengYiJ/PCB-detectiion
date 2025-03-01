@@ -37,7 +37,7 @@ class DepthwiseSeparableConvolution(nn.Module):
         x=self.relu(x)
         return x
 
-
+'''
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 conv = DepthwiseSeparableConvolution(3, 4, kernel_size=1, padding=0).to(device)
-print(summary(conv, input_size=(3, 64, 64)))
+print(summary(conv, input_size=(3, 64, 64)))'''
