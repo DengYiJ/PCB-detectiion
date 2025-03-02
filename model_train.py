@@ -7,7 +7,7 @@ from sklearn.metrics import accuracy_score
 from torch.nn.functional import cross_entropy, normalize
 from torch.utils.data import DataLoader
 from numpy import vstack, argmax
-from param import root_dir,TRAIN_BATCH_SIZE,VALIDATION_BATCH_SIZE,EPOCHS,LEARNING_RATE
+from param import root_dir,TRAIN_BATCH_SIZE,VALIDATION_BATCH_SIZE,EPOCHS,LEARNING_RATE,Embeding_dim
 import model
 import Dataset
 import LossFunc
@@ -56,6 +56,8 @@ class model_train(object):
                     print(f"x_batch type: {type(x_batch)}, shape: {x_batch.shape if isinstance(x_batch, torch.Tensor) else 'Not a tensor'}")
                 # x_batch: 图像张量 (batch_size, channels, height, width)
                 # y_batch: 标签张量 (batch_size, num_anchors, num_classes + 4)前 `num_classes` 列是分类标签（one-hot 编码），后 4 列是边界框标签。
+                    x_batch = x_batch.to(device)
+                    y_batch = y_batch.to(device)
                     y_batch=y_batch.long()
                     optimizer.zero_grad()
                     y_pre=model(x_batch)#`y_pre`：模型输出，形状为 `(batch_size, num_anchors, num_classes + 4)`。前 `num_classes` 列是分类预测。 后 4 列是边界框预测（`[x, y, w, h]`）。
@@ -105,8 +107,11 @@ class model_train(object):
 if __name__=='__main__':
     print("build model")#imghimgw是1600x3040，inchannel是3，patchsize是160，embeddim是768
     #这里要写model.py的transformer函数，然后引import img_size=(1600,3040) ,
-    model_transformer=model.model(patch_size=160,in_channels=3,embed_dim=768,norm_layer=None,num_heads=4,hideF=256,
-                 imgH=1600,imgW=3040,Pyin_channels=768,Pyout_channels=256,
+    # 检查 GPU 是否可用
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model_transformer=model.model(embed_dim=Embeding_dim,norm_layer=None,num_heads=4,hideF=256,
+                     imgH=1600,imgW=3040,Pyin_channels=Embeding_dim,Pyout_channels=256,
                  FimgH=4,FimgW=4,num_classes=4,num_anchors=6) #Fimg看pyramid用例
     model_train().train(model_transformer)#model_train类的实例化
     torch.save(model_transformer,'model.pth')

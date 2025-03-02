@@ -66,7 +66,7 @@ class PositionEmbeddingStatic(nn.Module):#num_features是序列长度18711，num
         x = x + pos_embed
         # 应用 Dropout
         x = self.pos_drop(x)
-        print(f"PositionEmbedding output shape: {x.shape}")
+        #print(f"PositionEmbedding output shape: {x.shape}")
         return x
 
 def test_PositionEm():

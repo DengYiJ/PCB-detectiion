@@ -23,3 +23,4 @@ TEST_BATCH_SIZE = 4    #测试批数大小
 LEARNING_RATE = 0.01  #0.001  #学习率
 EPOCHS = 30   #训练周期
 Droprate=0.5
+Embeding_dim=196

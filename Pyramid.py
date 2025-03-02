@@ -111,11 +111,11 @@ class Bottleneck(nn.Module):
 class pyramid(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(pyramid, self).__init__()
-        self.conv_list = nn.ModuleList([nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.conv_list = nn.ModuleList([nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
             for _ in range(5)])#为con_list添加5个conv2d
 
-        self.sequential = nn.Sequential(nn.Conv2d(in_channels,out_channels, 3, 1, 1, bias=False),nn.ReLU(inplace=True))
-        self.smooth_cov = nn.Sequential(nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),nn.ReLU(inplace=True))
+        self.sequential = nn.Sequential(nn.Conv1d(in_channels,out_channels, 3, 1, 1, bias=False),nn.ReLU(inplace=True))
+        self.smooth_cov = nn.Sequential(nn.Conv1d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),nn.ReLU(inplace=True))
         self.relu = nn.ReLU(inplace=True)
         self.me = MultiScaleEmbedding(out_channels, out_channels)  # 添加 MultiScaleEmbedding 模块
         self.maxpool = nn.MaxPool2d(2, 2, 0)
@@ -123,6 +123,9 @@ class pyramid(nn.Module):
         _, _, H, W = y.shape
         #逐个元素相加
         return F.interpolate(x, size=(H, W), mode='bilinear') + y
+
+    def tensor_add(self,x,y):
+        return x+y
 
     def forward(self, features):
         output=[]
@@ -132,11 +135,16 @@ class pyramid(nn.Module):
             output.append(x)
 
         #自上而下,横向链接
+        # p5=output[4]
+        # p4=self._umsample_add(p5,output[3])
+        # p3=self._umsample_add(p4,output[2])
+        # p2=self._umsample_add(p3,output[1])
+        # p1=self._umsample_add(p2,output[0])
         p5=output[4]
-        p4=self._umsample_add(p5,output[3])
-        p3=self._umsample_add(p4,output[2])
-        p2=self._umsample_add(p3,output[1])
-        p1=self._umsample_add(p2,output[0])
+        p4=self.tensor_add(p5,output[3])
+        p3=self.tensor_add(p4,output[2])
+        p2=self.tensor_add(p3,output[1])
+        p1=self.tensor_add(p2,output[0])
 
         #卷积融合，平滑处理
         p5=self.smooth_cov(p5)
@@ -150,7 +158,7 @@ class pyramid(nn.Module):
         b2 = self.me([p2, b1,output[1]])   # 在 b2 处进行 ME 操作并添加残差链接
         b3 = self.me([p3, b2,output[2]])   # 在 b3 处进行 ME 操作并添加残差链接
         b4 = self.me([p4, b3,output[3]])   # 在 b4 处进行 ME 操作并添加残差链接
-        b5 = self._umsample_add(p5, b4)  # 在 b5 处进行相加 操作
+        b5 = self.tensor_add(p5, b4)  # 在 b5 处进行相加 操作
         b6 = self.maxpool(b5)
 
         feature_list=[b1,b2,b3,b4,b5,b6]
@@ -162,9 +170,9 @@ class pyramid(nn.Module):
 class MultiScaleEmbedding(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(MultiScaleEmbedding, self).__init__()
-        self.weights=nn.Parameter(torch.ones(3))# 假设每次 ME 操作有两个输入
+        self.weights=nn.Parameter(torch.ones(3))# 假设每次 ME 操作有3个输入
         self.normalize=nn.Softmax(dim=0)
-        self.conv=nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.conv=nn.Conv1d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x_list):
         # x_list 是一个列表，包含3个输入特征图
@@ -179,7 +187,7 @@ if __name__ == "__main__":
     # 设置超参数
     B = 2  # 批处理大小
     D = 3  # 输入通道数（in_channels）
-    H = W = 4  # 特征图的高度和宽度
+    N= 64 # 特征图的高度和宽度
     in_channels = D
     out_channels = 6  # 输出通道数
     MEin_channels=out_channels
@@ -187,7 +195,7 @@ if __name__ == "__main__":
     # 生成随机输入特征图列表
     features = []
     for _ in range(5):
-        feature = torch.randn(B, D, H, W)  # 输入带有5个(B, D, H, W)的list
+        feature = torch.randn(B, D, N)  # 输入带有5个(B, D, H, W)的list
         features.append(feature)
     print(features)
     # 初始化金字塔模块
