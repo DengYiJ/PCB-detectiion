@@ -10,7 +10,7 @@ class FullyConnected(nn.Module):
 
     def forward(self, x):
         x=self.fc(x)
-        x=F.relu(x)
+        x=F.relu(x,False)
         return x
 
     '''先搭建模型，后forward动态'''

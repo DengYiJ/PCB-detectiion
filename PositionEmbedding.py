@@ -70,7 +70,7 @@ class PositionEmbeddingStatic(nn.Module):#num_features是序列长度18711，num
         return x
 
 def test_PositionEm():
-    x = torch.randn(4, 162, 768)
+    x = torch.randn(1, 1024, 196)
 
     # 创建 PositionEmbedding 模块
     num_patches = x.shape[1]  # 18711  162

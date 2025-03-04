@@ -23,7 +23,7 @@ class PatchEmbedding(nn.Module):
         self.norm=norm_layer(embed_dim)if norm_layer else nn.Identity()
 
     def forward(self, x):
-        print(f"PatchEmbedding input shape: {x.shape}")
+        #print(f"PatchEmbedding input shape: {x.shape}")
         B,C,H,W = x.shape
        # assert H == self.img_size[0] and W == self.img_size[1],f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         patch_height, patch_width = self.patch_size
@@ -33,7 +33,7 @@ class PatchEmbedding(nn.Module):
 
         x = self.proj(x).flatten(2).transpose(1,2)
         x=self.norm(x)
-        print(f"PatchEmbedding output shape: {x.shape}")
+        #print(f"PatchEmbedding output shape: {x.shape}")
         return x
 
     def test_PEb():
@@ -109,7 +109,7 @@ def test_PEb1():
     patch_embed = PatchEmbedding1(embed_dim=Embeding_dim)  # 不指定 in_channels 和 patch_size
 
     # 输入张量
-    x = torch.randn(8, 3, 1600, 3040)
+    x = torch.randn(1, 3, 224, 224)
     x = patch_embed(x)  # 输出形状为 [8, 1024, 196]
 
     # 再次调用时，输入张量的形状可以不同

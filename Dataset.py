@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 import param
 class MyDataset(Dataset):#transform=True表示进行变换，会把他变成张量
-    def __init__(self, root_dir, transform=None, train=True, test_size=0.1667, random_state=42, num_anchors=9, num_classes=6):
+    def __init__(self, root_dir, transform=None, train=True, test_size=0.1667, random_state=42, num_anchors=6, num_classes=6):
         super(MyDataset, self).__init__()
         self.root_dir = root_dir
         self.transform = transform
@@ -143,7 +143,7 @@ class MyDataset(Dataset):#transform=True表示进行变换，会把他变成张�
 def test_Dataset():
     # 定义数据增强和预处理操作
     transform = transforms.Compose([
-        transforms.Resize((3040, 1600)),  # 调整图片大小
+        transforms.Resize((224, 224)),  # 调整图片大小
         transforms.ToTensor(),  # 转换为张量
         transforms.Normalize(  # 标准化
             mean=[0.485, 0.456, 0.406],
@@ -155,15 +155,15 @@ def test_Dataset():
     dataset = MyDataset(root_dir=param.root_dir, transform=transform, train=True)
 
     # 创建数据加载器
-    data_loader = DataLoader(dataset, batch_size=1, shuffle=True)
+    data_loader = DataLoader(dataset, batch_size=4, shuffle=True)
 
     # 获取一个批次的数据并输出 y_batch 的细节
 
     # 下面适用于转换为张量的情况
     for images, y_batch in data_loader:
         print("Image shape:", images.shape)  # 输出图像的形状，Image shape: torch.Size([1, 3, 3040, 1600])
-        # print("y_batch shape:", y_batch.shape)  # 输出 y_batch 的形状
-        # print("y_batch content:", y_batch)  # 输出 y_batch 的内容
+        print("y_batch shape:", y_batch.shape)  # 输出 y_batch 的形状
+        print("y_batch content:", y_batch)  # 输出 y_batch 的内容
         break  # 只获取一个批次的数据
 
 
