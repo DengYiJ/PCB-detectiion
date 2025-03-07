@@ -3,6 +3,9 @@ import torch.nn as nn
 #from torch.nn import GELU
 import numpy as np
 import torch
+from functorch.einops import rearrange
+
+
 class GELU(nn.Module):
     def __init__(self):
         super(GELU, self).__init__()
@@ -37,7 +40,7 @@ class Attention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.scale = (dim // num_heads) ** -0.5
-
+        print(f"dim: {dim}, num_heads: {num_heads},scale: {self.scale}")
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)# 一个线性层，用于生成查询（Query）、键（Key）和值（Value）。输入维度为dim，输出维度为dim * 3（因为同时生成Q、K、V）
         self.attn_drop = nn.Dropout(attn_drop)#对注意力权重进行dropout
         self.proj = nn.Linear(dim, dim)#线性层，将注意力机制的输出投影回原始维度dim
@@ -58,16 +61,17 @@ class Attention(nn.Module):
         return x  #返回最终的输出特征x，形状为 (B, N, C)
 
 
-
+def testTrans():
 # 输入特征 (Batch size=2, Sequence length=10, Feature dimension=64)两批，序列长为10，特征维度为64
-x = torch.randn(4, 163, 768)
-dim=768
+    x = torch.randn(4, 163, 768)
+    dim=768
 # 创建注意力模块 (dim=64, num_heads=8)
-attn = Attention(dim, num_heads=4)
+    attn = Attention(dim, num_heads=4)
 
 # 前向传播
-output = attn(x)
-print(output.shape)  # 输出: torch.randn(4, 163, 768)
+    output = attn(x)
+    print(output.shape)  # 输出: torch.randn(4, 163, 768)
+
 
 class Mlp(nn.Module):
     """ MLP as used in Vision Transformer, MLP-Mixer and related networks机器语言程序
@@ -111,4 +115,146 @@ class Block(nn.Module):
         return x
 
 
+class SparseAttention(nn.Module):
+    def __init__(self, dim, num_heads=8, window_size=64, block_size=32):
+        super().__init__()
+        self.heads = num_heads
+        self.block_size = block_size
+        self.window_size = window_size
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.scale = (dim // num_heads) ** -0.5
+        self.proj = nn.Linear(dim, dim)  # 添加投影层
+        self.downsample = nn.Conv1d(dim, dim, kernel_size=3, stride=2, padding=1) if dim > 256 else None
 
+    def forward(self, x):
+        if self.downsample and x.shape[1] > 4096:
+            x = x.transpose(1, 2)
+            x = self.downsample(x)
+            x = x.transpose(1, 2)
+
+        B, N, C = x.shape
+        qkv = self.qkv(x)
+
+        # 将 qkv 分头
+        qkv = rearrange(qkv, 'b n (h d) -> b h n d', h=self.heads)
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        # 合并头以进行分块
+        q = rearrange(q, 'b h n d -> b n (h d)')
+        k = rearrange(k, 'b h n d -> b n (h d)')
+        v = rearrange(v, 'b h n d -> b n (h d)')
+
+        output = self._sparse_block_attention(q, k, v, N)
+
+        # 转换回多头格式并投影
+        output = rearrange(output, 'b n (h d) -> b n h d', h=self.heads)
+        output = rearrange(output, 'b n h d -> b n (h d)')
+        output = self.proj(output)
+
+        return output
+
+    def _dynamic_blocking(self, x, seq_len):
+        """集成动态分块逻辑"""
+        block_size = self.block_size
+        num_blocks = seq_len // block_size
+        remainder = seq_len % block_size
+
+        # 尾部填充处理
+        if remainder > 0:
+            pad_size = block_size - remainder
+            x = F.pad(x, (0, 0, 0, pad_size))  # 填补长度到 L+pad
+            num_blocks += 1
+        else:
+            pad_size = 0
+
+        # 分块重塑 (B, num_blocks, block_size, C)
+        x_blocks = x.view(-1, num_blocks, block_size, x.size(-1))
+        return x_blocks, num_blocks, pad_size
+
+    def _sparse_block_attention(self, q, k, v, seq_len):
+        """改进后的分块注意力"""
+        B, N, C = q.shape
+
+        # Step 1: 动态分块处理
+        q_blocks, num_blocks, pad_size = self._dynamic_blocking(q, seq_len)
+        k_blocks, _, _ = self._dynamic_blocking(k, seq_len)
+        v_blocks, _, _ = self._dynamic_blocking(v, seq_len)
+
+        # Step 2: 滑动窗口处理
+        outputs = []
+        for i in range(num_blocks):
+            # 计算当前块的邻域范围（按块数计算）
+            start = max(0, i - self.window_size)
+            end = min(num_blocks, i + self.window_size + 1)
+
+            # 提取当前查询块和邻域键值块
+            q_block = q_blocks[:, i]  # (B, block_size, C)
+            k_blocks_window = k_blocks[:, start:end]  # (B, window_blocks, block_size, C)
+            v_blocks_window = v_blocks[:, start:end]  # (B, window_blocks, block_size, C)
+
+            # 计算块间注意力
+            attn = torch.einsum('bsc,bwsc->bsw', q_block, k_blocks_window) * self.scale
+            attn = F.softmax(attn, dim=-1)
+
+            # 加权聚合
+            out = torch.einsum('bsw,bwsc->bsc', attn, v_blocks_window)
+            outputs.append(out)
+
+        # Step 3: 合并输出并裁剪填充
+        output = torch.cat(outputs, dim=1)  # (B, num_blocks*block_size, C)
+        if pad_size > 0:
+            output = output[:, :-pad_size]  # 裁剪填充部分
+        # print(f"output after clipping: {output.shape}")  # 调试信息
+        return output
+
+    class Block(nn.Module):
+        """优化后的Block保持原有接口"""
+
+        def __init__(self, dim, num_heads, mlp_ratio=4.,
+                     window_size=64, block_size=64,
+                     drop=0., attn_drop=0., drop_path=0.):
+            super().__init__()
+            #第一层，标准化+稀疏注意力
+            self.norm1 = nn.LayerNorm(dim)
+            self.attn = SparseAttention(
+                dim,
+                num_heads=num_heads,
+                window_size=window_size,
+                block_size=block_size
+            )
+            #第二层：标准化+MLP
+            self.norm2 = nn.LayerNorm(dim)
+            self.mlp = Mlp(in_features=dim, hidden_features=int(dim * mlp_ratio), drop=drop)
+            #残差连接控制
+            self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        def forward(self, x):
+            #第一层残差
+            x = x + self.drop_path(self.attn(self.norm1(x)))
+            #第二层残差
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x
+
+def test_sparse_attention():
+    # 定义测试参数
+    dim = 196
+    num_heads = 4
+    window_size = 64
+    block_size = 32
+
+    # 构造输入张量
+    batch_size = 1
+    seq_len = 1025
+    x = torch.randn(batch_size, seq_len, dim)
+
+    # 初始化 SparseAttention 模块
+    attention = SparseAttention(dim, num_heads, window_size, block_size)
+
+    # 执行前向传播
+    output = attention(x)
+
+    # 验证输出形状
+    assert output.shape == (batch_size, seq_len, dim), "输出形状不匹配"
+
+if __name__ == "__main__":
+    test_sparse_attention()
