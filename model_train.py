@@ -2,7 +2,7 @@ import torch
 #from mpmath.identification import transforms
 import torchvision.transforms as transforms
 #from pandas.conftest import axis_1
-from pyglet import model
+#from pyglet import model
 from sklearn.metrics import accuracy_score
 from torch.nn.functional import cross_entropy, normalize
 from torch.utils.data import DataLoader
@@ -56,7 +56,7 @@ class model_train(object):
         scheduler = StepLR(optimizer, step_size=30, gamma=0.5)
 
         # 初始化 GradScaler
-        scaler = GradScaler("cuda")
+        scaler = torch.amp.GradScaler("cuda")
 
         print('start training')
         with open('training_log.txt', 'w') as file:
@@ -68,12 +68,15 @@ class model_train(object):
                 # y_batch: 标签张量 (batch_size, num_anchors, num_classes + 4)前 `num_classes` 列是分类标签（one-hot 编码），后 4 列是边界框标签。
                     x_batch = x_batch.to(device)
                     y_batch = y_batch.to(device)
+                    # 强制将输入数据转换为 FP16
+                   # x_batch = x_batch.half()
                     y_batch=y_batch.long()
                     print(f"y_batch type: {type(y_batch)}, shape: {y_batch.shape}")
                     optimizer.zero_grad()
                     # 使用混合精度训练
-                    with autocast(dtype=torch.float16):  #自动混合精度上下文
+                    with torch.amp.autocast(device_type="cuda",dtype=torch.float16):  #自动混合精度上下文
                         y_pre=model(x_batch)#`y_pre`：模型输出，形状为 `(batch_size, num_anchors, num_classes + 4)`。前 `num_classes` 列是分类预测。 后 4 列是边界框预测（`[x, y, w, h]`）。
+                        print(f"y_pre tensor dtype: {y_pre.dtype}")#y_pre tensor dtype: torch.float16
                         assert y_pre.dtype is torch.float16
                         criterion = LossFunc.CustomLoss()  # ✅ 先实例化
                         loss = criterion(y_pre, y_batch)  # ✅ 正确调用
@@ -254,5 +257,10 @@ if __name__=='__main__':
     model_transformer=model.model(embed_dim=Embeding_dim,norm_layer=None,num_heads=4,hideF=256,
                      Pyin_channels=Embeding_dim,Pyout_channels=32,
                  num_classes=6,num_anchors=6,Netdepth=Netdepth) #Fimg看pyramid用例
+    # 将模型转换为半精度 (FP16)
+    model_transformer=model_transformer.half()
+    # 将模型移动到 GPU
+    model_transformer = model_transformer.to(device)
+
     model_train().train(model_transformer)#model_train类的实例化
     torch.save(model_transformer,'model.pth')

@@ -126,7 +126,15 @@ class SparseAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)  # 添加投影层
         self.downsample = nn.Conv1d(dim, dim, kernel_size=3, stride=2, padding=1) if dim > 256 else None
 
+        # # 将权重和偏置转换为 FP16
+        # self.qkv.weight = nn.Parameter(self.qkv.weight.to(torch.float16))
+        # self.qkv.bias = nn.Parameter(self.qkv.bias.to(torch.float16))
+        # self.proj.weight = nn.Parameter(self.proj.weight.to(torch.float16))
+        # self.proj.bias = nn.Parameter(self.proj.bias.to(torch.float16))
+
     def forward(self, x):
+        # x = x.to(torch.float16)
+
         if self.downsample and x.shape[1] > 4096:
             x = x.transpose(1, 2)
             x = self.downsample(x)
@@ -151,6 +159,7 @@ class SparseAttention(nn.Module):
         output = rearrange(output, 'b n h d -> b n (h d)')
         output = self.proj(output)
 
+        #print("Output dtype:", output.dtype)#Output dtype: torch.float16
         return output
 
     def _dynamic_blocking(self, x, seq_len):
