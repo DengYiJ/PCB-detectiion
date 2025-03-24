@@ -26,17 +26,71 @@ class CustomLoss(nn.Module):
         assert c_pre.shape == c_hat.shape, f"Shape mismatch: c_pre {c_pre.shape} vs c_hat {c_hat.shape}"
         # 计算分类损失 L_class
         # 使用交叉熵损失
-        L_class = F.cross_entropy(c_pre.transpose(1, 2), c_hat.argmax(dim=2), reduction='mean')
+        batch_size, num_anchors, _ = c_pre.shape
+        classification_losses = []
+        for i in range(batch_size):
+            defect_mask = c_hat[i].argmax(dim=1).bool()  # 获取缺陷锚框的掩码 (num_anchors,)
+            if torch.any(defect_mask):
+                class_loss = F.cross_entropy(c_pre[i][defect_mask], c_hat[i][defect_mask].argmax(dim=1),
+                                             reduction='sum')
+                classification_losses.append(class_loss)
+
+        if classification_losses:
+            L_class = sum(classification_losses) / batch_size
+        else:
+            L_class = torch.tensor(0.0, device=y_pre.device)
 
         # 计算边界框回归损失 L_box
         # 仅对包含缺陷的锚框（c_hat_j = 1）计算
         defect_mask = c_hat.argmax(dim=2).bool()  # 获取缺陷锚框的掩码 (batch_size, num_anchors)
         if torch.any(defect_mask):  # 如果存在缺陷锚框
-            L_box = F.smooth_l1_loss(b_pre[defect_mask].float(), b_hat[defect_mask].float(), reduction='mean')
+            L_box = F.smooth_l1_loss(b_pre[defect_mask].float(), b_hat[defect_mask].float(),
+                                     reduction='sum') / batch_size
         else:
             L_box = torch.tensor(0.0, device=y_pre.device)  # 如果没有缺陷锚框，损失为 0
 
         # 总损失
-        total_loss = L_class + self.beta * L_box
-       # total_loss = total_loss.to(torch.float32)  # 强制转换
+        total_loss = (L_class + self.beta * L_box) / (torch.sum(defect_mask) + 1e-8)
         return total_loss
+
+def generate_random_data(batch_size, num_anchors, num_classes):
+    # 生成随机的模型输出 y_pre
+    y_pre = torch.randn(batch_size, num_anchors, num_classes + 4)
+
+    # 生成随机的真实标签 y_batch
+    c_hat = torch.zeros(batch_size, num_anchors, num_classes)
+    b_hat = torch.rand(batch_size, num_anchors, 4)
+
+    # 随机选择一些锚框作为缺陷锚框，并设置它们的真实类别
+    for i in range(batch_size):
+        defect_indices = torch.randint(0, num_anchors, (torch.randint(0, num_anchors, (1,)).item(),))
+        c_hat[i, defect_indices] = F.one_hot(torch.randint(0, num_classes, (len(defect_indices),)),
+                                                 num_classes).float()
+
+    y_batch = torch.cat((c_hat, b_hat), dim=2)
+
+    return y_pre, y_batch
+
+
+def test_custom_loss():
+    # 设置参数
+    batch_size = 4
+    num_anchors = 6
+    num_classes = 6
+    beta = 1.0
+
+    # 生成随机数据
+    y_pre, y_batch = generate_random_data(batch_size, num_anchors, num_classes)
+
+    # 实例化 CustomLoss
+    criterion = CustomLoss(beta=beta)
+
+    # 计算损失
+    loss = criterion(y_pre, y_batch)
+
+    # 打印损失值
+    print(f"Computed Loss: {loss.item()}")#Computed Loss: 0.9916955232620239
+
+
+if __name__ == "__main__":
+    test_custom_loss()
