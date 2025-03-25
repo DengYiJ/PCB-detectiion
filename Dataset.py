@@ -63,11 +63,14 @@ class MyDataset(Dataset):#transform=True表示进行变换，会把他变成张�
         # 打开图像
         image = Image.open(img_path).convert('RGB')
 
+        # 获取原始图像尺寸
+        original_img_width, original_img_height = image.size
+
         # 解析 XML 文件，获取目标信息
         objects = self.parse_xml(xml_path)
 
         # 转换为目标检测模型的输入格式
-        y_batch = self.convert_to_model_input(objects)
+        y_batch = self.convert_to_model_input(objects, original_img_width, original_img_height)
 
         # 应用变换
         if self.transform is not None:
@@ -98,7 +101,7 @@ class MyDataset(Dataset):#transform=True表示进行变换，会把他变成张�
             })
         return objects
 
-    def convert_to_model_input(self, objects):
+    def convert_to_model_input(self, objects,img_width,img_height):
         # 将目标信息转换为模型的输入格式（`y_batch`）
         # 假设模型使用锚框（anchors）预测目标，每个锚框包含类别和边界框
         # 这里我们生成一个标签张量，形状为 (1, num_anchors, num_classes + 4)
@@ -133,8 +136,22 @@ class MyDataset(Dataset):#transform=True表示进行变换，会把他变成张�
             if class_idx < self.num_classes:
                 y_batch[ i, class_idx] = 1.0  # 类别概率
 
+                # 设置边界框坐标并归一化
+                normalized_bbox = [
+                    bbox[0] / img_width,  # xmin
+                    bbox[1] / img_height,  # ymin
+                    bbox[2] / img_width,  # xmax
+                    bbox[3] / img_height  # ymax
+                ]
+            #    print(f"imgW={img_width}, imgH={img_height}")
+            #     print(f"Object {i}: Original bbox={bbox}, Normalized bbox={normalized_bbox}")
+                for coord in normalized_bbox:
+                    assert isinstance(coord, float), "normalized_bbox 中的元素不是浮点数"
+
+                y_batch[i, self.num_classes:] = torch.tensor(normalized_bbox)
+
             # 设置边界框坐标
-            y_batch[i, self.num_classes:] = torch.tensor(bbox)  # [xmin, ymin, xmax, ymax]
+          #  y_batch[i, self.num_classes:] = torch.tensor(bbox)  # [xmin, ymin, xmax, ymax]
 
         return y_batch
 
