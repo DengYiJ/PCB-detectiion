@@ -1,6 +1,6 @@
 import torch.nn.functional as F
 import torch
-from torch import nn
+from torch import nn, autocast
 
 
 # conv = SKConv(64, 32, 3, 8, 2)   output:`[batch_size, features, H, W]`。
@@ -26,7 +26,8 @@ class SKConv(nn.Module):
             self.convs.append(nn.Sequential(
                 nn.Conv2d(features, features, kernel_size=3 + i * 2, stride=stride, padding=1 + i, groups=G),
                 nn.BatchNorm2d(features),
-                nn.ReLU(inplace=False)
+               # nn.ReLU(inplace=False),
+                nn.GELU()
             ))
         # 全局平均池化
         self.gap = nn.AvgPool2d(int(WH / stride))
@@ -38,13 +39,16 @@ class SKConv(nn.Module):
                 nn.Linear(d, features)
             )
         self.softmax = nn.Softmax(dim=1)
-
+    # @autocast('cuda')
     def forward(self, x):
         ''' Split操作'''
+        x = x.to(torch.float32)
+        # print(f"[SKConv] Input shape: {x.shape}, dtype={x.dtype}")  # 输入验证[2](@ref)
         for i, conv in enumerate(self.convs):
           # fea = conv(x).unsqueeze_(dim=1)
             # 修改后代码（避免原地操作）：
             fea = conv(x).unsqueeze(dim=1)  # 创建新张量
+            # print(f"[SKConv] Branch {i} output range: [{fea.min():.3f}, {fea.max():.3f}]")  # 卷积分支数值监测[1]
             if i == 0:
                 feas = fea
             else:
@@ -53,8 +57,10 @@ class SKConv(nn.Module):
         ''' Fuse操作'''
         fea_U = torch.sum(feas, dim=1)
         fea_s = self.gap(fea_U).squeeze_()
+        # print(f"[SKConv] After GAP: shape={fea_s.shape}")  # 确认降维正确性[2]
         fea_z = self.fc(fea_s)
-
+        assert not torch.isnan(fea_z).any(), "NaN in fea_z!"
+        # print(f"[SKConv] fea_z range: [{fea_z.min():.3f}, {fea_z.max():.3f}]")  # 监测全连接层输出[1]
         ''' Select操作'''
         for i, fc in enumerate(self.fcs):
             # fc-->d*c维
@@ -64,10 +70,15 @@ class SKConv(nn.Module):
             else:
                 attention_vectors = torch.cat([attention_vectors, vector], dim=1)
         # 计算attention权重
+        # attention_vectors = self.softmax(attention_vectors)
+        attention_vectors = attention_vectors.clamp(min=-10, max=10)
+        # attention_vectors = attention_vectors - attention_vectors.max(dim=1, keepdim=True).values
         attention_vectors = self.softmax(attention_vectors)
+        # print(f"[SKConv] Attention weights sum: {attention_vectors.sum(dim=1)}")  # 验证概率分布[
         attention_vectors = attention_vectors.unsqueeze(-1).unsqueeze(-1)
         # 最后一步，各特征图与对应的注意力权重相乘，得到输出特征图V
         fea_v = (feas * attention_vectors).sum(dim=1)
+        # print(f"[SKConv] Output shape: {fea_v.shape},dtype={fea_v.dtype}, has NaN: {torch.isnan(fea_v).any()}")  # 最终输出验证[5]
         return fea_v
 
 
@@ -159,32 +170,36 @@ class SKNet(nn.Module):
 
 
 # 测试用例
-    def test_skconv():
+def test_skconv():
     # 设置超参数
-        batch_size = 2
-        channels = 4
-        height = 8
-        width = 8
-        WH = 8
-        M = 2
-        G = 2
-        r = 2
-        stride = 1
-        L = 32
+    batch_size = 2
+    channels = 4
+    height = 8
+    width = 8
+    WH = 8
+    M = 2
+    G = 2
+    r = 2
+    stride = 1
+    L = 32
 
     # 输入张量
-        x = torch.randn(batch_size, channels, height, width)
+    x = torch.randn(batch_size, channels, height, width).cuda() #输入FP32
 
     # 初始化 SKConv 模块
-        skconv = SKConv(features=channels, WH=WH, M=M, G=G, r=r, stride=stride, L=L)
+    skconv = SKConv(features=channels, WH=WH, M=M, G=G, r=r, stride=stride, L=L).cuda()
 
     # 前向传播
-        output = skconv(x)
+    output = skconv(x)
 
     # 验证输出形状
-        expected_output_shape = (batch_size, channels, height, width)
-        assert output.shape == expected_output_shape, f"输出形状不匹配，期望 {expected_output_shape}，实际 {output.shape}"
+    expected_output_shape = (batch_size, channels, height, width)
+    assert output.shape == expected_output_shape, f"输出形状不匹配，期望 {expected_output_shape}，实际 {output.shape}"
 
-        print("SKConv 测试通过！")
+    for name, param in skconv.named_parameters():  # 打印ff模块的模型参数
+        print(f"Parameter '{name}' dtype: {param.dtype}")
 
-    #test_skconv()
+    print("SKConv 测试通过！")
+
+if __name__ == "__main__":
+    test_skconv()

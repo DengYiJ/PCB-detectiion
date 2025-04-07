@@ -1,29 +1,103 @@
+# -*- coding: utf-8 -*-
 import torch
 #from mpmath.identification import transforms
 import torchvision.transforms as transforms
+from matplotlib import pyplot as plt
 #from pandas.conftest import axis_1
-from pyglet import model
-from sklearn.metrics import accuracy_score
+#from pyglet import model
+from sklearn.metrics import accuracy_score, confusion_matrix, auc
+from torch import ops
 from torch.nn.functional import cross_entropy, normalize
 from torch.utils.data import DataLoader
 from numpy import vstack, argmax
 import numpy as np
 from LossFunc import num_classes
-from param import root_dir,TRAIN_BATCH_SIZE,VALIDATION_BATCH_SIZE,EPOCHS,LEARNING_RATE,Embeding_dim,Netdepth
+from param import root_dir,TRAIN_BATCH_SIZE,VALIDATION_BATCH_SIZE,EPOCHS,LEARNING_RATE,Embeding_dim,Netdepth,visualizations_dir
 import model
 import Dataset
 import LossFunc
 from torch.optim.lr_scheduler import StepLR
 from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
+from model1 import model1
+from VisualizedPredict import visualize_predictions
 from sklearn.metrics import accuracy_score
+import torch.nn.functional as F
+# 设置中文字体
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 用黑体显示中文
+plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
+
 class model_train(object):
     #def __init__(self,model):
+    # 检查输入数据
+    def check_input_data(x):
+        print("Input data has NaN:", torch.isnan(x).any())
+        print("Input data has inf:", torch.isinf(x).any())
+
+    @staticmethod
+    def compute_iou(boxA, boxB):
+            # 计算两个边界框的交并比 (IoU)
+        xA = max(boxA[0], boxB[0])
+        yA = max(boxA[1], boxB[1])
+        xB = min(boxA[2], boxB[2])
+        yB = min(boxA[3], boxB[3])
+
+        interArea = max(0, xB - xA +1) * max(0, yB - yA+1 )
+
+        boxAArea = (boxA[2] - boxA[0]+1 ) * (boxA[3] - boxA[1]+1)
+        boxBArea = (boxB[2] - boxB[0]+1) * (boxB[3] - boxB[1]+1 )
+
+        # iou = interArea / float(boxAArea + boxBArea - interArea+ 1e-8)
+
+        return interArea / float(boxAArea + boxBArea - interArea+ 1e-8)
+
+    def apply_nms(self, boxes, scores, iou_threshold=0.5):
+        # 将边界框和分数转换为 PyTorch 张量
+        boxes_tensor = torch.tensor(boxes, dtype=torch.float32)
+        scores_tensor = torch.tensor(scores, dtype=torch.float32)
+
+        # 应用 NMS
+        keep_indices = ops.nms(boxes_tensor, scores_tensor, iou_threshold)
+
+        # 返回保留的边界框和分数
+        nms_boxes = boxes_tensor[keep_indices].numpy()
+        nms_scores = scores_tensor[keep_indices].numpy()
+
+        return nms_boxes, nms_scores
+
+    @staticmethod
+    def calculate_AP(precision, recall):
+        # 使用VOC2010标准计算平均精度 (AP)
+        ap = 0.
+        for t in np.arange(0., 1.1, 0.1):
+            if np.sum(recall >= t) == 0:
+                p = 0
+            else:
+                p = np.max(precision[recall >= t])
+            ap = ap + p / 11.
+
+        return ap
+
+    @staticmethod    # 添加自定义的 collate_fn
+    def custom_collate_fn(batch):
+        # 分离不同类型的数据
+        images = [item[0] for item in batch]  # 变换后的图像
+        labels = [item[1] for item in batch]  # 标签
+        original_images = [item[2] for item in batch]  # 原始图像
+        original_sizes = [item[3] for item in batch]  # 原始尺寸
+
+        # 堆叠变换后的图像和标签（这些应该是相同尺寸的）
+        images = torch.stack(images, 0)
+        labels = torch.stack(labels, 0)
+
+        # 原始图像和尺寸保持为列表形式
+        return images, labels, original_images, original_sizes
+
     def train(self,model):
         #将训练数据集分为8：1：1的训练集，验证集，数据集
         train_transform = transforms.Compose([
-           # transforms.Resize((1600, 3040)),
-            transforms.Resize((256, 256)),# 调整图片大小
+           transforms.Resize((1024, 1024)),
+           #  transforms.Resize((256, 256)),# 调整图片大小
             transforms.ToTensor(),         # 转换为张量
             transforms.Normalize(          # 标准化
             mean=[0.485, 0.456, 0.406],
@@ -32,7 +106,7 @@ class model_train(object):
             ])
 
         val_transform=transforms.Compose([
-            transforms.Resize((256,256)),
+            transforms.Resize((1024,1024)),
            # transforms.RandomVerticleFlip(),
             transforms.ToTensor(),
             transforms.Normalize(  # 标准化
@@ -48,56 +122,117 @@ class model_train(object):
         train_dataset= Dataset.MyDataset(root_dir, transform=train_transform,train=True)
         val_dataset= Dataset.MyDataset(root_dir, transform=val_transform,train=False)
 
-        train_dl=DataLoader(dataset=train_dataset,batch_size=TRAIN_BATCH_SIZE,shuffle=True,drop_last=True)
-        validation_dl=DataLoader(dataset=val_dataset,batch_size=VALIDATION_BATCH_SIZE,shuffle=True,drop_last=True)
+        # train_dl=DataLoader(dataset=train_dataset,batch_size=TRAIN_BATCH_SIZE,shuffle=True,drop_last=True)
+        # validation_dl = DataLoader(dataset=val_dataset, batch_size=VALIDATION_BATCH_SIZE, shuffle=True, drop_last=True)
+        train_dl = DataLoader(
+            dataset=train_dataset,
+            batch_size=TRAIN_BATCH_SIZE,
+            shuffle=True,
+            drop_last=True,
+            collate_fn=self.custom_collate_fn  # 添加自定义的 collate_fn
+        )
 
+        validation_dl = DataLoader(
+            dataset=val_dataset,
+            batch_size=VALIDATION_BATCH_SIZE,
+            shuffle=True,
+            drop_last=True,
+            collate_fn=self.custom_collate_fn  # 验证集也需要使用相同的 collate_fn
+        )
     #使用adam优化
         optimizer=torch.optim.Adam(model.parameters(),lr=LEARNING_RATE)
         scheduler = StepLR(optimizer, step_size=30, gamma=0.5)
 
         # 初始化 GradScaler
-        scaler = GradScaler("cuda")
+        scaler = torch.amp.GradScaler("cuda")
 
         print('start training')
         with open('training_log.txt', 'w') as file:
             for epochs in range(EPOCHS):
-                torch.autograd.set_detect_anomaly(True)
-                for x_batch,y_batch in tqdm(train_dl, desc=f"Epoch {epochs+1}/{EPOCHS}", total=len(train_dl), ncols=100):
-                    print(f"x_batch type: {type(x_batch)}, shape: {x_batch.shape if isinstance(x_batch, torch.Tensor) else 'Not a tensor'}")
+                # torch.autograd.set_detect_anomaly(True)
+                total_loss = 0
+                cls_loss = 0
+                box_loss = 0
+
+                model.train()
+                for x_batch,y_batch,original_images, original_sizes in tqdm(train_dl, desc=f"Epoch {epochs+1}/{EPOCHS}", total=len(train_dl), ncols=100):
+                    # print(f"x_batch type: {type(x_batch)}, shape: {x_batch.shape if isinstance(x_batch, torch.Tensor) else 'Not a tensor'}")
                 # x_batch: 图像张量 (batch_size, channels, height, width)
                 # y_batch: 标签张量 (batch_size, num_anchors, num_classes + 4)前 `num_classes` 列是分类标签（one-hot 编码），后 4 列是边界框标签。
                     x_batch = x_batch.to(device)
                     y_batch = y_batch.to(device)
-                    y_batch=y_batch.long()
-                    print(f"y_batch type: {type(y_batch)}, shape: {y_batch.shape}")
+                    assert not torch.isnan(x_batch).any(), "x_batch contains NaN"
+                    assert not torch.isinf(x_batch).any(), "x_batch contains Inf"
+                    assert not torch.isnan(y_batch).any(), "y_batch contains NaN"
+                    assert not torch.isinf(y_batch).any(), "y_batch contains Inf"
+                    #如果检测到 NaN 或 Inf，assert 会抛出一个 AssertionError，并附带相应的错误信息（如 "x_batch contains NaN"）。
+                    # 强制将输入数据转换为 FP16
+                   # x_batch = x_batch.half()
+                    if y_batch.dtype != torch.float32:
+                        y_batch = y_batch.float()
+                    # print(f"y_batch type: {type(y_batch)}, shape: {y_batch.shape}")
                     optimizer.zero_grad()
                     # 使用混合精度训练
-                    with autocast(dtype=torch.float16):  #自动混合精度上下文
-                        y_pre=model(x_batch)#`y_pre`：模型输出，形状为 `(batch_size, num_anchors, num_classes + 4)`。前 `num_classes` 列是分类预测。 后 4 列是边界框预测（`[x, y, w, h]`）。
-                        assert y_pre.dtype is torch.float16
-                        criterion = LossFunc.CustomLoss()  # ✅ 先实例化
-                        loss = criterion(y_pre, y_batch)  # ✅ 正确调用
-                        #print(f"loss dtype: {loss.dtype}")
+                    #with torch.amp.autocast(device_type="cuda",dtype=torch.float16):  #自动混合精度上下文
+                    y_pre=model(x_batch)#`y_pre`：模型输出，形状为 `(batch_size, num_anchors, num_classes + 4)`。前 `num_classes` 列是分类预测。 后 4 列是边界框预测（`[x, y, w, h]`）。
+                        # print(f"y_pre tensor dtype: {y_pre.dtype}")#y_pre tensor dtype: torch.float16
+                    # assert y_pre.dtype is torch.float32
+                    criterion = LossFunc.CustomLoss()  # ✅ 先实例化
+                    loss,l_cls, l_box = criterion(y_pre, y_batch)  # ✅ 正确调用
+                    # 记录损失
+                    total_loss += loss.item()
+                    cls_loss += l_cls.item()
+                    box_loss += l_box.item()
+                    # print("Loss requires_grad:", loss.requires_grad)
+                        # print(f"loss dtype: {loss.dtype}") #FP32
                         #assert loss.dtype is torch.float16
+                        # 打印中间输出以检查NaN或Inf值
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        print(f"NaN or Inf detected in loss: {loss}")
+                        break
                     # loss.backward()
+                    file.write(f"Epoch {epochs + 1}")
+                    file.write(f"x_batch shape: {x_batch.shape}, dtype: {x_batch.dtype}")
+                    file.write(f"y_batch shape: {y_batch.shape}, dtype: {y_batch.dtype}")
+                    file.write(f"y_pre shape: {y_pre.shape}, dtype: {y_pre.dtype}")
+                    file.write(f"y_batch:{y_batch.detach().cpu().numpy()}")
+                    file.write(f"y_pre:{y_pre.detach().cpu().numpy()}")
+                    file.write(f"Loss: {loss.item()}")
+                    # file.flush()
+                   # with torch.autograd.detect_anomaly():
                     scaler.scale(loss).backward()  # 缩放损失并反向传播
+
+                    scaler.unscale_(optimizer)  # 取消缩放以便于梯度裁剪
+                        # 梯度裁剪
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
                     scaler.step(optimizer)  # 更新优化器
                     scaler.update()  # 更新 GradScaler
+                    # 打印每个epoch的平均损失
+                    avg_total = total_loss / len(train_dl)
+                    avg_cls = cls_loss / len(train_dl)
+                    avg_box = box_loss / len(train_dl)
 
+                    file.write(
+                        f"Epoch {epochs + 1}: Total Loss={avg_total:.4f}, Class Loss={avg_cls:.4f}, Box Loss={avg_box:.4f}")
+                    file.flush()
+                    # # 在训练循环中直接使用 y_pre 进行可视化
+                    # visualize_predictions( original_images, y_pre.detach().cpu(), y_batch.cpu(), visualizations_dir,
+                    #                       epochs + 1, num_classes=6, original_sizes=original_sizes )
 
                     #optimizer.step()#模型参数的更新体现在loss.backward()和optimizer.step()这两个步骤中。
 #loss.backward()计算梯度，optimizer.step()应用这些梯度来更新模型的参数。
         #运用测试集计算更新模型的精确度
-                test_accuracy=self.evaluate_model(validation_dl,model,num_classes);
-                print("Epoch:",epochs+1,"loss:%.5f",loss.item(),"Accuracy:%.5f",test_accuracy)
-                log_string = "Epoch: %d, loss: %.5f, Test accuracy: %.5f\n" % (epochs + 1, loss.item(), test_accuracy)
+                MAP=self.evaluate_model(validation_dl,model,num_classes,epochs+1);
+                print("Epoch:",epochs+1,"loss:%.5f",loss.item(),"MAP:%.5f",MAP)
+                log_string = "Epoch: %d, loss: %.5f,MAP: %.5f\n" % (epochs + 1, loss.item(), MAP)
 
-                if test_accuracy > best_accuracy + threshold:
-                    best_accuracy = test_accuracy
+                if MAP > best_accuracy + threshold:
+                    best_accuracy = MAP
                     no_improve_epochs = 0
                 # Save the best model
                     torch.save(model, 'best_model.pth')
-                    print("New best model saved with accuracy: {0:.5f}".format(best_accuracy))
+                    print("New best model saved with MAP: {0:.5f}".format(best_accuracy))
                 else:
                     no_improve_epochs += 1
                     if no_improve_epochs >= patience:
@@ -115,39 +250,58 @@ class model_train(object):
             torch.cuda.empty_cache()
 
     #是怎么评估模型好坏的呢？用验证集！
-    def evaluate_model(self,validation_dl,model,num_classes,iou_threshold=0.5):
-        predictions,actuals=[],[]#初始化空列表
+
+
+    def evaluate_model(self, validation_dl, model, num_classes,epoch, iou_threshold=0.5, device='cuda'):
+        # model.eval()
+        predictions, actuals = [], []  # 初始化空列表
         per_image_detection = []  # 保存每个图像的预测和真实框信息
         class_predictions = [[] for _ in range(num_classes)]  # 保存预测框（置信度、类别、框）
         class_ground_truth = [[] for _ in range(num_classes)]  # 保存真实框（类别、框）
-       # num_classes=num_classes
-        for x_label,y_label in validation_dl:
-            y_hat=model(x_label) # 假设输出形状 (batch_size, num_anchors, num_classes+4)
-            y_hat=y_hat.detach().numpy()#yhat.detach().numpy() 这一步是为了确保在评估或预测时不干扰模型的训练过程，同时允许你将张量数据转换为更通用的格式
-            actual_label=y_label.detach().numpy()
-            #将预测标签和真实标签转换为类标签
-            # 提取分类标签部分并取 argmax
-            # 提取分类标签和边界框部分
-            actual_cls = actual_label[:, :, :num_classes]  # (batch_size, num_anchors, num_classes)
-            actual_boxes = actual_label[:, :, num_classes:]  # (batch_size, num_anchors, 4)
-            pred_cls = y_hat[:, :, :num_classes]  # (batch_size, num_anchors, num_classes)
-            pred_boxes = y_hat[:, :, num_classes:]  # (batch_size, num_anchors, 4)
-            # 置信度（每个锚点的最大分类概率）
-            pred_conf = np.max(pred_cls, axis=2)  # 置信度（每个锚点的最大分类概率）
-            pred_cls_idx = np.argmax(pred_cls, axis=2)  # 预测类别
+        batch_idx = 0
+        for x_label, y_label, original_images, original_sizes in validation_dl:
+            x_label, y_label = x_label.to(device), y_label.to(device)  # 将数据移动到指定设备
+            with torch.no_grad():
+                y_hat = model(x_label)  # 假设输出形状 (batch_size, num_anchors, num_classes+4)
+                # 对分类预测应用softmax
+               # cls_pred = F.softmax(cls_pred, dim=-1)
+                # 在每个epoch的第一个batch进行可视化
+                if batch_idx == 0:
+                    visualize_predictions(
+                        original_images,
+                        y_hat.detach().cpu(),
+                        y_label.cpu(),
+                        visualizations_dir,
+                        epoch,  # 现在可以正确传递 epoch
+                        num_classes=6,
+                        original_sizes=original_sizes
+                    )
+                batch_idx += 1
 
-            batch_size = pred_boxes.shape[0]
-            num_anchors = pred_boxes.shape[1]
+            # 提取分类标签部分并取 argmax
+                actual_cls = y_label[:, :, :num_classes]  # (batch_size, num_anchors, num_classes)
+                actual_boxes = y_label[:, :, num_classes:]  # (batch_size, num_anchors, 4)
+                pred_cls = y_hat[:, :, :num_classes]  # (batch_size, num_anchors, num_classes)
+                pred_boxes = y_hat[:, :, num_classes:]  # (batch_size, num_anchors, 4)
+
+            # 置信度（每个锚点的最大分类概率）
+                pred_conf, pred_cls_idx = torch.max(pred_cls, dim=2)  # (batch_size, num_anchors)
+                '''torch.max(pred_cls, dim=2)：在分类预测的最后一个维度（类别维度）上取最大值。
+pred_conf：每个锚点的最大分类概率（置信度），形状为 (batch_size, num_anchors)。
+pred_cls_idx：每个锚点的预测类别索引，形状为 (batch_size, num_anchors)。'''
+                batch_size = pred_boxes.shape[0]
+                num_anchors = pred_boxes.shape[1]
+
             for i in range(batch_size):
                 for j in range(num_anchors):
                     # 预测框
-                    pred_box = pred_boxes[i, j]
-                    pred_confidence = pred_conf[i, j]
-                    pred_class = pred_cls_idx[i, j]
+                    pred_box = pred_boxes[i, j].cpu().detach().numpy()
+                    pred_confidence = pred_conf[i, j].item()
+                    pred_class = pred_cls_idx[i, j].item()
 
                     # 真实框
-                    actual_box = actual_boxes[i, j]
-                    actual_class = np.argmax(actual_cls[i, j])
+                    actual_box = actual_boxes[i, j].cpu().detach().numpy()
+                    actual_class = torch.argmax(actual_cls[i, j]).item()
 
                     # 保存预测框信息
                     class_predictions[pred_class].append({
@@ -161,90 +315,133 @@ class model_train(object):
                         'box': actual_box,
                         'image_id': i
                     })
-                    # 计算每个类别的 AP 和 mAP
-                    aps = []
-                    for class_id in range(num_classes):
-                        # 获取当前类别的预测和真实框
-                        preds = class_predictions[class_id]
-                        gts = class_ground_truth[class_id]
 
-                        if len(gts) == 0:
-                            aps.append(-1)  # 如果没有真实框，AP 设置为 -1 表示无效
-                            continue
+        # 计算每个类别的 AP 和 mAP
+        aps = [] #用于存储每个类别的 AP
+        all_pred_labels = []
+        all_true_labels = []
+        for class_id in range(num_classes):
+            # 获取当前类别的预测和真实框
+            preds = class_predictions[class_id]
+            gts = class_ground_truth[class_id]
 
-                        # 统计所有真实框
-                        all_gts = []
-                        for gt in gts:
-                            all_gts.append(gt['box'])
+            if len(gts) == 0:
+                aps.append(-1)  # 如果没有真实框，AP 设置为 -1 表示无效
+                continue
 
-                        # 统计所有预测框
-                        all_preds = []
-                        for pred in preds:
-                            all_preds.append({
-                                'confidence': pred['confidence'],
-                                'box': pred['box'],
-                                'image_id': pred['image_id']
-                            })
+            # 统计所有真实框
+            all_gts = [(gt['box'], gt['image_id']) for gt in gts]
 
-                        # 排序预测框（按置信度降序）
-                        all_preds_sorted = sorted(all_preds, key=lambda x: x['confidence'], reverse=True)
+            # 统计所有预测框
+            all_preds = [(pred['confidence'], pred['box'], pred['image_id']) for pred in preds]
 
-                        # 初始化 TP 和 FP
-                        tp = np.zeros(len(all_preds_sorted))
-                        fp = np.zeros(len(all_preds_sorted))
+            # 排序预测框（按置信度降序）
+            all_preds_sorted = sorted(all_preds, key=lambda x: x[0], reverse=True)
 
-                        # 遍历每个预测框
-                        for idx, pred in enumerate(all_preds_sorted):
-                            matched = False
-                            # 遍历当前图像的真实框
-                            for gt in gts:
-                                if gt['image_id'] == pred['image_id']:
-                                    iou = compute_iou(pred['box'], gt['box'])
-                                    if iou >= iou_threshold:
-                                        matched = True
-                                        # 防止重复匹配
-                                        gts.pop(gts.index(gt))
-                                        break
-                            if matched:
-                                tp[idx] = 1
-                            else:
-                                fp[idx] = 1
+            # 初始化 TP 和 FP
+            tp = np.zeros(len(all_preds_sorted))
+            fp = np.zeros(len(all_preds_sorted))
 
-                        # 计算 Precision 和 Recall
-                        precision = np.cumsum(tp) / (np.cumsum(tp) + np.cumsum(fp) + 1e-8)
-                        recall = np.cumsum(tp) / len(gts)
+            # 标记已经匹配的真实框
+            matched_gts = set()
 
-                        # 计算 AP
-                        ap = calculate_AP(precision, recall)
-                        aps.append(ap)
+            # 遍历每个预测框
+            for idx, (conf, pred_box, image_id) in enumerate(all_preds_sorted):
+                matched = False
+                # 遍历当前图像的真实框
+                for k, (gt_box, gt_image_id) in enumerate(all_gts):
+                    if gt_image_id == image_id and k not in matched_gts:
+                        iou = self.compute_iou(pred_box, gt_box)
+                        if iou >= iou_threshold:
+                            matched = True
+                            # 防止重复匹配
+                            matched_gts.add(k)
+                            break
+                if matched:
+                    tp[idx] = 1
+                    all_pred_labels.append(class_id)
+                    all_true_labels.append(class_id)
+                else:
+                    fp[idx] = 1
+                    all_pred_labels.append(class_id)
+                    all_true_labels.append(-1)  # 表示负样本
+            # 改进的匹配逻辑
+            # used_gt_indices = set()  # 记录已匹配的真实框索引
+            #
+            # for idx, (conf, pred_box, image_id) in enumerate(all_preds_sorted):
+            #     best_iou = 0
+            #     best_gt_idx = -1
+            #
+            #     # 寻找最佳匹配的真实框
+            #     for k, (gt_box, gt_image_id) in enumerate(all_gts):
+            #         if gt_image_id == image_id and k not in used_gt_indices:
+            #             iou = self.compute_iou(pred_box, gt_box)
+            #             if iou > best_iou:
+            #                 best_iou = iou
+            #                 best_gt_idx = k
+            #
+            #     # 判断是否匹配成功
+            #     if best_iou >= iou_threshold:
+            #         tp[idx] = 1
+            #         used_gt_indices.add(best_gt_idx)  # 标记该真实框已匹配
+            #     else:
+            #         fp[idx] = 1
 
-                    # 计算 mAP
-                    valid_aps = [ap for ap in aps if ap != -1]
-                    mAP = sum(valid_aps) / len(valid_aps) if valid_aps else 0.0
+            # 计算 Precision 和 Recall
+            cumsum_tp = np.cumsum(tp)
+            cumsum_fp = np.cumsum(fp)
+            precision = cumsum_tp / (cumsum_tp + cumsum_fp + 1e-8)
+            recall = cumsum_tp / len(gts)
+             # 添加对单点或空预测的处理
+            if len(precision) <= 1 or len(recall) <= 1:
+                print(f"Warning: Class {class_id} has insufficient predictions for AUC calculation")
+                ap = 0.0  # 给这种情况赋0分
+            else:
+                ap = self.calculate_AP(precision, recall)
+            # 计算 AP
+            # ap = self.calculate_AP(precision, recall)
+            aps.append(ap)
 
-                    return mAP
+            # Plot Precision-Recall Curve
+            plt.close('all')
+            plt.figure(figsize=(8, 6))
+            plt.plot(recall, precision, label=f'Class {class_id} (area = {auc(recall, precision):.2f})')
+            plt.xlabel('Recall')
+            plt.ylabel('Precision')
+            plt.title(f'Precision-Recall curve for Class {class_id}')
+            plt.legend(loc='lower left')
+            plt.savefig(f"./image/pr_curve_class_{class_id}.png", dpi=300, bbox_inches='tight')
+            plt.close()
 
-def calculate_AP(precision, recall):
-    """计算 AP"""
-    m = np.concatenate(([0], recall, [1]))
-    p = np.concatenate(([0], precision, [0]))
-    for i in range(len(p) - 1, 0, -1):
-        p[i - 1] = max(p[i - 1], p[i])
-    indices = np.where(m[1:] != m[:-1])[0]
-    AP = np.sum((m[indices] - m[indices - 1]) * p[indices])
-    return AP
+        # 计算 mAP
+        valid_aps = [ap for ap in aps if ap != -1]
+        mAP = sum(valid_aps) / len(valid_aps) if valid_aps else 0.0
 
-def compute_iou(box1, box2):
-    """计算两个边界框的 IoU"""
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
-    inter_area = max(0, x2 - x1) * max(0, y2 - y1)
-    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
-    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
-    iou = inter_area / float(box1_area + box2_area - inter_area)
-    return iou
+        # 计算混淆矩阵
+        label_names = ['missing_hole', 'mouse_bite', 'open_circuit', 'short', 'spur', 'spurious_copper']
+        cm = confusion_matrix(all_true_labels, all_pred_labels, labels=list(range(num_classes)))
+        self.plot_confusion_matrix(cm, label_names)
+
+        return mAP
+
+    def plot_confusion_matrix(self, cm, label_names, title='Confusion matrix', cmap=plt.cm.Reds):
+        plt.close('all')
+        plt.figure(figsize=(10, 8))
+        plt.matshow(cm, cmap=cmap)  # 根据最下面的图按自己需求更改颜色
+
+        for i in range(len(cm)):
+            for j in range(len(cm)):
+                plt.annotate(cm[j, i], xy=(i, j), horizontalalignment='center', verticalalignment='center')
+
+        num_local = np.array(range(len(label_names)))
+        plt.xticks(num_local, label_names, rotation=90)  # 将标签印在x轴坐标上
+        plt.yticks(num_local, label_names)  # 将标签印在y轴坐标上
+        plt.ylabel('真实标签')
+        plt.xlabel('预测标签')
+        plt.savefig("./image/confusion_matrix.png", dpi=300, bbox_inches='tight')
+        plt.close()
+
+
 if __name__=='__main__':
     print("build model")#imghimgw是1600x3040，inchannel是3，patchsize是160，embeddim是768
     #这里要写model.py的transformer函数，然后引import img_size=(1600,3040) ,
@@ -254,5 +451,10 @@ if __name__=='__main__':
     model_transformer=model.model(embed_dim=Embeding_dim,norm_layer=None,num_heads=4,hideF=256,
                      Pyin_channels=Embeding_dim,Pyout_channels=32,
                  num_classes=6,num_anchors=6,Netdepth=Netdepth) #Fimg看pyramid用例
+    # 将模型转换为半精度 (FP16)
+    #model_transformer=model_transformer.half()
+    # 将模型移动到 GPU
+    model_transformer = model_transformer.to(device)
+
     model_train().train(model_transformer)#model_train类的实例化
     torch.save(model_transformer,'model.pth')
