@@ -1,9 +1,12 @@
+import math
+
 import torch.nn.functional as F
 import torch.nn as nn
 #from torch.nn import GELU
 import numpy as np
 import torch
 from functorch.einops import rearrange
+from torch import autocast
 
 
 class GELU(nn.Module):
@@ -116,7 +119,7 @@ class Block(nn.Module):
 
 
 class SparseAttention(nn.Module):
-    def __init__(self, dim, num_heads=8, window_size=64, block_size=32):
+    def __init__(self, dim, num_heads=8, window_size=64, block_size=32,reduction_ratio=4):
         super().__init__()
         self.heads = num_heads
         self.block_size = block_size
@@ -125,15 +128,23 @@ class SparseAttention(nn.Module):
         self.scale = (dim // num_heads) ** -0.5
         self.proj = nn.Linear(dim, dim)  # 添加投影层
         self.downsample = nn.Conv1d(dim, dim, kernel_size=3, stride=2, padding=1) if dim > 256 else None
-
+        # # 将权重和偏置转换为 FP16
+        # self.qkv.weight = nn.Parameter(self.qkv.weight.to(torch.float16))
+        # self.qkv.bias = nn.Parameter(self.qkv.bias.to(torch.float16))
+        # self.proj.weight = nn.Parameter(self.proj.weight.to(torch.float16))
+        # self.proj.bias = nn.Parameter(self.proj.bias.to(torch.float16))
+    # @torch.amp.autocast(device_type='cuda')
     def forward(self, x):
+
         if self.downsample and x.shape[1] > 4096:
             x = x.transpose(1, 2)
             x = self.downsample(x)
             x = x.transpose(1, 2)
 
         B, N, C = x.shape
+        # print(f"x shape: {x.shape}, dtype: {x.dtype}")
         qkv = self.qkv(x)
+        # print(f"qkv shape: {qkv.shape}, dtype: {qkv.dtype}")  # 调试 qkv 形状和类型
 
         # 将 qkv 分头
         qkv = rearrange(qkv, 'b n (h d) -> b h n d', h=self.heads)
@@ -149,8 +160,10 @@ class SparseAttention(nn.Module):
         # 转换回多头格式并投影
         output = rearrange(output, 'b n (h d) -> b n h d', h=self.heads)
         output = rearrange(output, 'b n h d -> b n (h d)')
+        # print(f"rearranged output shape: {output.shape}, dtype: {output.dtype}")  # 调试重排后的输出
         output = self.proj(output)
 
+        # print("Output dtype:", output.dtype)#Output dtype: torch.float16
         return output
 
     def _dynamic_blocking(self, x, seq_len):
@@ -212,7 +225,7 @@ class SparseAttention(nn.Module):
 
         def __init__(self, dim, num_heads, mlp_ratio=4.,
                      window_size=64, block_size=64,
-                     drop=0., attn_drop=0., drop_path=0.):
+                     drop=0., attn_drop=0., drop_path=0.1):
             super().__init__()
             #第一层，标准化+稀疏注意力
             self.norm1 = nn.LayerNorm(dim)
@@ -245,16 +258,19 @@ def test_sparse_attention():
     # 构造输入张量
     batch_size = 1
     seq_len = 1025
-    x = torch.randn(batch_size, seq_len, dim)
-
+    x = torch.randn(batch_size, seq_len, dim).half().cuda()
+    # print(f"x input tensor dtype: {x.dtype}") #FP32
     # 初始化 SparseAttention 模块
-    attention = SparseAttention(dim, num_heads, window_size, block_size)
+    attention = SparseAttention(dim, num_heads, window_size, block_size).half().cuda()#取半了
 
     # 执行前向传播
-    output = attention(x)
-
+   # with torch.autocast(device_type="cuda"):
+    output = attention(x)  #Output dtype: torch.float16
+    print(f"sparse output shape: {output.shape}, dtype: {output.dtype}") #([1,1025,196])(B,N,C)
     # 验证输出形状
     assert output.shape == (batch_size, seq_len, dim), "输出形状不匹配"
+    for name, param in  attention.named_parameters():  # 打印ff模块的模型参数
+        print(f"Parameter '{name}' dtype: {param.dtype}")
 
 if __name__ == "__main__":
     test_sparse_attention()
