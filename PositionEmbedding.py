@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from param import Droprate
-
+from torch.cuda.amp import autocast
 #torch.randn(4, 18711,768)
 class PositionEmbeddingDynamic(nn.Module):#inputshape是宽x高，num_features是序列长度18711，num_features是patch_embedding的em_dim；num_features 是指嵌入维度（embed_dim），即 patch_embedding 的输出特征维度。
     def __init__(self,imgH,imgW,num_features,num_patches,patch_size):#patch_size是16x16的滑窗？
@@ -23,6 +23,8 @@ class PositionEmbeddingDynamic(nn.Module):#inputshape是宽x高，num_features�
         #   在特征提取的过程中，classtoken会与图片特征进行特征的交互。最终分类时，我们取出classtoken的特征，利用全连接分类。
         # --------------------------------------------------------------------------------------------------------------------#
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.num_features))
+        # 将 cls_token 移动到正确的设备上
+        self.cls_token = self.cls_token.to(self.device)
         # --------------------------------------------------------------------------------------------------------------------#
         #   为网络提取到的特征添加上位置信息。
         #   以输入图片为224, 224, 3为例，我们获得的序列化后的图片特征为[196, 768]。加上classtoken后就是197, 768
@@ -57,8 +59,16 @@ class PositionEmbeddingStatic(nn.Module):#num_features是序列长度18711，num
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches+1, num_features))
         self.pos_drop = nn.Dropout(p=Droprate)
 
+        # 将参数转换为 FP16
+       # self.cls_token = nn.Parameter(self.cls_token.to(torch.float16))
+       # self.pos_embed = nn.Parameter(self.pos_embed.to(torch.float16))
+
+    # @torch.amp.autocast(device_type='cuda')
     def forward(self, x):
       #  x=self.PatchEmbedding(x)
+      #   print(f"PosE intput tensor dtype: {x.dtype}")
+        #x = x.to(torch.float16)
+      # print(f"PositionEmbedding output shape: {x.shape}")
         cls_token = self.cls_token.expand(x.shape[0],-1,-1)
         x = torch.cat((cls_token, x), dim=1)# [B, 1 + num_patches, num_features]
         # 添加位置嵌入
@@ -67,20 +77,28 @@ class PositionEmbeddingStatic(nn.Module):#num_features是序列长度18711，num
         # 应用 Dropout
         x = self.pos_drop(x)
         #print(f"PositionEmbedding output shape: {x.shape}")
+       # x=x.type(torch.float16)
+       #  print(f"posEmbed output tensor dtype: {x.dtype}")
         return x
 
 def test_PositionEm():
-    x = torch.randn(1, 1024, 196)
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    x = torch.randn(1, 1024, 196).to(device)
+    x=x.half()#输入fp16，输出也是fp16
     # 创建 PositionEmbedding 模块
     num_patches = x.shape[1]  # 18711  162
     num_features = x.shape[2]  # 768   768
     # pos_embed = PositionEmbeddingDynamic(imgH=1600,imgW=3040,num_features=num_features, num_patches=num_patches,patch_size=190)
-    pos_embed = PositionEmbeddingStatic(num_features=num_features, num_patches=num_patches)
+    pos_embed = PositionEmbeddingStatic(num_features=num_features, num_patches=num_patches).to(device)
+    pos_embed=pos_embed.half()#取半成功Parameter 'cls_token' dtype: torch.float16
+                                    #Parameter 'pos_embed' dtype: torch.float16
     # 前向传播
     output = pos_embed(x)
-    print(f"Position Embedding Output Shape: {output.shape}")  # static输出torch.Size([4, 163, 768])成功
-
+    #print(f"Position Embedding Output Shape: {output.shape}")  # static输出torch.Size([4, 163, 768])成功
+    print("Output dtype:", output.dtype)
+    for name, param in  pos_embed.named_parameters():  # 打印ff模块的模型参数
+        print(f"Parameter '{name}' dtype: {param.dtype}")
 
 if __name__ == "__main__":
     test_PositionEm()
