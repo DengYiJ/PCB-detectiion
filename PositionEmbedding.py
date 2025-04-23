@@ -58,7 +58,7 @@ class PositionEmbeddingStatic(nn.Module):#num_features是序列长度18711，num
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.num_features))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches+1, num_features))
         self.pos_drop = nn.Dropout(p=Droprate)
-
+        self.norm = nn.LayerNorm(num_features)
         # 将参数转换为 FP16
        # self.cls_token = nn.Parameter(self.cls_token.to(torch.float16))
        # self.pos_embed = nn.Parameter(self.pos_embed.to(torch.float16))
@@ -76,6 +76,7 @@ class PositionEmbeddingStatic(nn.Module):#num_features是序列长度18711，num
         x = x + pos_embed
         # 应用 Dropout
         x = self.pos_drop(x)
+        x = self.norm(x)
         #print(f"PositionEmbedding output shape: {x.shape}")
        # x=x.type(torch.float16)
        #  print(f"posEmbed output tensor dtype: {x.dtype}")

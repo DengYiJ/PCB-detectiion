@@ -1,37 +1,37 @@
 # -*- coding: utf-8 -*-
 import math
 import torch
-#from mpmath.identification import transforms
 import torchvision.transforms as transforms
 from matplotlib import pyplot as plt
-#from pandas.conftest import axis_1
-#from pyglet import model
 from sklearn.metrics import accuracy_score, confusion_matrix, auc
-from torch.nn.functional import cross_entropy, normalize
 from torch.utils.data import DataLoader
-from numpy import vstack, argmax
 import numpy as np
 from LossFunc import num_classes
-from param import root_dir,TRAIN_BATCH_SIZE,VALIDATION_BATCH_SIZE,EPOCHS,LEARNING_RATE,Embeding_dim,Netdepth,visualizations_dir
+from param import root_dir, TRAIN_BATCH_SIZE, VALIDATION_BATCH_SIZE, EPOCHS, LEARNING_RATE, Embeding_dim, Netdepth, \
+    visualizations_dir, Num_Anchors
 import model
 import Dataset
 import LossFunc
 from torch.optim.lr_scheduler import StepLR
-from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
-from model1 import model1
 from VisualizedPredict import visualize_predictions
-from sklearn.metrics import accuracy_score
 import torch.nn.functional as F
    # 应用 NMS - 使用torchvision.ops.nms
 from torchvision.ops import nms
+import os
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 用黑体显示中文
 plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
-
+BACKGROUND_CLASS = 0
 class model_train(object):
-    #def __init__(self,model):
-    # 检查输入数据
+    def __init__(self):
+        # Initialize lists to store training and validation losses and mAP
+        self.train_losses = []
+        self.eval_losses = [] # Store average validation loss per epoch
+        self.eval_maps = [] # Store validation mAP per epoch
+        # Ensure visualizations_dir is accessible or passed
+        # self.visualizations_dir = visualizations_dir # Assuming visualizations_dir is imported from param
+
     def check_input_data(x):
         print("Input data has NaN:", torch.isnan(x).any())
         print("Input data has inf:", torch.isinf(x).any())
@@ -42,22 +42,31 @@ class model_train(object):
         if any(math.isnan(x) for x in boxA) or any(math.isnan(x) for x in boxB):
             print(f"检测到非法NaN值：boxA={boxA}, boxB={boxB}")
             return 0.0
+        # Ensure x1 < x2 and y1 < y2 for both boxes
+        boxA = np.array([min(boxA[0], boxA[2]), min(boxA[1], boxA[3]), max(boxA[0], boxA[2]), max(boxA[1], boxA[3])])
+        boxB = np.array([min(boxB[0], boxB[2]), min(boxB[1], boxB[3]), max(boxB[0], boxB[2]), max(boxB[1], boxB[3])])
         # 计算两个边界框的交并比 (IoU)
+
         xA = max(boxA[0], boxB[0])
         yA = max(boxA[1], boxB[1])
         xB = min(boxA[2], boxB[2])
         yB = min(boxA[3], boxB[3])
 
-        interArea = max(0, xB - xA +1) * max(0, yB - yA+1 )
+        # interArea = max(0, xB - xA +1) * max(0, yB - yA+1 )
+        interArea = max(0, xB - xA ) * max(0, yB - yA )
 
-        boxAArea = (boxA[2] - boxA[0]+1 ) * (boxA[3] - boxA[1]+1)
-        boxBArea = (boxB[2] - boxB[0]+1) * (boxB[3] - boxB[1]+1 )
-
+        # boxAArea = (boxA[2] - boxA[0]+1 ) * (boxA[3] - boxA[1]+1)
+        # boxBArea = (boxB[2] - boxB[0]+1) * (boxB[3] - boxB[1]+1 )
+        boxAArea = (boxA[2] - boxA[0] ) * (boxA[3] - boxA[1])
+        boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1] )
         # iou = interArea / float(boxAArea + boxBArea - interArea+ 1e-8)
 
         return interArea / float(boxAArea + boxBArea - interArea+ 1e-8)
 
     def apply_nms(self, boxes, scores, iou_threshold=0.5):
+        # boxes: numpy array (N, 4) in (x1, y1, x2, y2) format
+        # scores: numpy array (N,)
+        # iou_threshold: float
         # 将边界框和分数转换为 PyTorch 张量
         boxes_tensor = torch.tensor(boxes, dtype=torch.float32)
         scores_tensor = torch.tensor(scores, dtype=torch.float32)
@@ -72,11 +81,15 @@ class model_train(object):
         nms_boxes = boxes_tensor[keep_indices].numpy()
         nms_scores = scores_tensor[keep_indices].numpy()
 
-        return nms_boxes, nms_scores
+        # return nms_boxes, nms_scores
+        # 返回保留的原始索引 (相对于输入的 boxes 和 scores 数组)
+        return keep_indices.numpy()  # Return numpy array of indices
 
     @staticmethod
     def calculate_AP(precision, recall):
         # 使用VOC2010标准计算平均精度 (AP)
+        for i in range(len(precision) - 2, -1, -1):
+             precision[i] = np.maximum(precision[i], precision[i + 1])
         ap = 0.
         for t in np.arange(0., 1.1, 0.1):
             if np.sum(recall >= t) == 0:
@@ -87,35 +100,113 @@ class model_train(object):
 
         return ap
 
+    @staticmethod
+    def decode_pred_boxes_to_original(raw_boxes_padded_01, original_size, padded_size, scale, pad_x, pad_y):
+        """
+        Decodes raw box predictions (assumed to be 0-1 in padded size)
+        into absolute box coordinates (x1, y1, x2, y2) in the ORIGINAL image size.
+
+        raw_boxes_padded_01: numpy array (N, 4) - model output for boxes (0-1 in padded size)
+        original_size: tuple (orig_width, orig_height)
+        padded_size: tuple (padded_width, padded_height)
+        """
+        # This function replicates the prediction decoding logic from visualize_predictions
+        orig_w, orig_h = original_size
+        padded_w, padded_h = padded_size
+
+        decoded_boxes = raw_boxes_padded_01.copy()  # Work on a copy
+
+        # Get scaling and padding used for this image during preprocessing (from custom_collate_fn logic)
+        # Based on visualize_predictions: scale = 1024 / min(orig_width, orig_height)
+        scale = 1024 / min(orig_w, orig_h)
+        new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+        pad_x = (1024 - new_w) // 2
+        pad_y = (1024 - new_h) // 2
+
+        # Scale from 0-1 padded to padded pixel coordinates
+        decoded_boxes[:, 0] *= padded_w
+        decoded_boxes[:, 1] *= padded_h
+        decoded_boxes[:, 2] *= padded_w
+        decoded_boxes[:, 3] *= padded_h
+
+        # Remove padding and scale back to original pixel coordinates
+        decoded_boxes[:, 0] = (decoded_boxes[:, 0] - pad_x) / scale
+        decoded_boxes[:, 1] = (decoded_boxes[:, 1] - pad_y) / scale
+        decoded_boxes[:, 2] = (decoded_boxes[:, 2] - pad_x) / scale
+        decoded_boxes[:, 3] = (decoded_boxes[:, 3] - pad_y) / scale
+
+        # Ensure coordinates are within original image bounds (optional but safe)
+        decoded_boxes[:, 0] = np.clip(decoded_boxes[:, 0], 0, orig_w)
+        decoded_boxes[:, 1] = np.clip(decoded_boxes[:, 1], 0, orig_h)
+        decoded_boxes[:, 2] = np.clip(decoded_boxes[:, 2], 0, orig_w)
+        decoded_boxes[:, 3] = np.clip(decoded_boxes[:, 3], 0, orig_h)
+
+        return decoded_boxes  # Returns numpy array in original pixel (x1, y1, x2, y2)
+
+    @staticmethod
+    def decode_gt_boxes_to_original(raw_gt_boxes_padded_01, original_size, padded_size, scale, pad_x, pad_y):
+        """
+         Decodes raw ground truth boxes (assumed to be 0-1 in padded size)
+         into absolute box coordinates (x1, y1, x2, y2) in the ORIGINAL image size (pixels).
+         Uses pre-calculated scale and padding.
+
+         raw_gt_boxes_padded_01: numpy array (N, 4) - ground truth boxes (0-1 in padded size)
+         original_size: tuple (orig_width, orig_height)
+         padded_size: tuple (padded_width, padded_height)
+         scale: float - scale factor used for resizing
+         pad_x: int - x padding offset
+         pad_y: int - y padding offset
+         """
+        orig_w, orig_h = original_size
+        padded_w, padded_h = padded_size
+
+        decoded_boxes = raw_gt_boxes_padded_01.copy()
+
+        # Scale from 0-1 padded to padded pixel coordinates
+        decoded_boxes[:, 0] *= padded_w
+        decoded_boxes[:, 1] *= padded_h
+        decoded_boxes[:, 2] *= padded_w
+        decoded_boxes[:, 3] *= padded_h
+
+        # Remove padding and scale back to original pixel coordinates
+        # Ensure scale is not zero to avoid division by zero
+        if scale == 0:
+            print("Warning: Scale is zero during decoding.")
+            return np.zeros_like(decoded_boxes)  # Return zero boxes or handle as error
+
+        decoded_boxes[:, 0] = (decoded_boxes[:, 0] - pad_x) / scale
+        decoded_boxes[:, 1] = (decoded_boxes[:, 1] - pad_y) / scale
+        decoded_boxes[:, 2] = (decoded_boxes[:, 2] - pad_x) / scale
+        decoded_boxes[:, 3] = (decoded_boxes[:, 3] - pad_y) / scale
+
+        # Ensure coordinates are within original image bounds (optional but safe)
+        decoded_boxes[:, 0] = np.clip(decoded_boxes[:, 0], 0, orig_w)
+        decoded_boxes[:, 1] = np.clip(decoded_boxes[:, 1], 0, orig_h)
+        decoded_boxes[:, 2] = np.clip(decoded_boxes[:, 2], 0, orig_w)
+        decoded_boxes[:, 3] = np.clip(decoded_boxes[:, 3], 0, orig_h)
+
+        return decoded_boxes
+
     @staticmethod    # 添加自定义的 collate_fn
     def custom_collate_fn(batch):
-        # 分离不同类型的数据
-        images = [item[0] for item in batch]  # 变换后的图像
-        labels = [item[1] for item in batch]  # 标签
-        original_images = [item[2] for item in batch]  # 原始图像
-        original_sizes = [item[3] for item in batch]  # 原始尺寸
+        # batch is a list of tuples: [(transformed_image, y_batch, original_image_np, original_size, scale, pad_x, pad_y, padded_size), ...]
 
-        # # 找到当前批次中的最大尺寸
-        # max_h = max([img.shape[1] for img in images])
-        # max_w = max([img.shape[2] for img in images])
-        # 对图像进行填充
-        padded_images = []
-        for img in images:
-            # 计算需要填充的量
-            pad_h = 1024 - img.shape[1]
-            pad_w = 1024 - img.shape[2]
+        # Separate the data types
+        images = [item[0] for item in batch]
+        labels = [item[1] for item in batch]
+        original_images_np = [item[2] for item in batch]
+        original_sizes = [item[3] for item in batch]
+        scales = [item[4] for item in batch]  # Collect scales
+        pad_xs = [item[5] for item in batch]  # Collect pad_xs
+        pad_ys = [item[6] for item in batch]  # Collect pad_ys
+        padded_sizes = [item[7] for item in batch]  # Collect padded_sizes
 
-        # 对称填充（左、右、上、下）
-        padded_img = F.pad(img, (pad_w//2, pad_w - pad_w//2, 
-                                pad_h//2, pad_h - pad_h//2), 
-                         value=0)
-        padded_images.append(padded_img)
-        # 堆叠变换后的图像和标签（这些应该是相同尺寸的）
-        images = torch.stack(images, 0)
-        labels = torch.stack(labels, 0)
+        # Stack the tensors (images and labels)
+        images_batch = torch.stack(images, 0)
+        labels_batch = torch.stack(labels, 0)
 
-        # 原始图像和尺寸保持为列表形式
-        return images, labels, original_images, original_sizes
+        # Return stacked tensors and lists of other data
+        return images_batch, labels_batch, original_images_np, original_sizes, scales, pad_xs, pad_ys, padded_sizes
 
     def train(self,model):
         #将训练数据集分为8：1：1的训练集，验证集，数据集
@@ -182,7 +273,7 @@ class model_train(object):
                 box_loss = 0
 
                 model.train()
-                for x_batch,y_batch,original_images, original_sizes in tqdm(train_dl, desc=f"Epoch {epochs+1}/{EPOCHS}", total=len(train_dl), ncols=100):
+                for x_batch, y_batch, original_images, original_sizes, scales, pad_xs, pad_ys, padded_sizes in tqdm(train_dl, desc=f"Epoch {epochs+1}/{EPOCHS}", total=len(train_dl), ncols=100):
                     # print(f"x_batch type: {type(x_batch)}, shape: {x_batch.shape if isinstance(x_batch, torch.Tensor) else 'Not a tensor'}")
                 # x_batch: 图像张量 (batch_size, channels, height, width)
                 # y_batch: 标签张量 (batch_size, num_anchors, num_classes + 4)前 `num_classes` 列是分类标签（one-hot 编码），后 4 列是边界框标签。
@@ -218,13 +309,13 @@ class model_train(object):
                         print(f"NaN or Inf detected in loss: {loss}")
                         break
                     # loss.backward()
-                    file.write(f"Epoch {epochs + 1}")
-                    file.write(f"x_batch shape: {x_batch.shape}, dtype: {x_batch.dtype}")
-                    file.write(f"y_batch shape: {y_batch.shape}, dtype: {y_batch.dtype}")
-                    file.write(f"y_pre shape: {y_pre.shape}, dtype: {y_pre.dtype}")
-                    file.write(f"y_batch:{y_batch.detach().cpu().numpy()}")
-                    file.write(f"y_pre:{y_pre.detach().cpu().numpy()}")
-                    file.write(f"Loss: {loss.item()}")
+                    # file.write(f"Epoch {epochs + 1}")
+                    # file.write(f"x_batch shape: {x_batch.shape}, dtype: {x_batch.dtype}")
+                    # file.write(f"y_batch shape: {y_batch.shape}, dtype: {y_batch.dtype}")
+                    # file.write(f"y_pre shape: {y_pre.shape}, dtype: {y_pre.dtype}")
+                    # file.write(f"y_batch:{y_batch.detach().cpu().numpy()}")
+                    # file.write(f"y_pre:{y_pre.detach().cpu().numpy()}")
+                    # file.write(f"Loss: {loss.item()}")
                     # file.flush()
                    # with torch.autograd.detect_anomaly():
                     scaler.scale(loss).backward()  # 缩放损失并反向传播
@@ -236,13 +327,14 @@ class model_train(object):
                     scaler.step(optimizer)  # 更新优化器
                     scaler.update()  # 更新 GradScaler
                     # 打印每个epoch的平均损失
-                    avg_total = total_loss / len(train_dl)
-                    avg_cls = cls_loss / len(train_dl)
-                    avg_box = box_loss / len(train_dl)
+                avg_train_total_loss = total_loss / len(train_dl)
+                self.train_losses.append(avg_train_total_loss)
+                # avg_cls = cls_loss / len(train_dl)
+                # avg_box = box_loss / len(train_dl)
 
-                    file.write(
-                        f"Epoch {epochs + 1}: Total Loss={avg_total:.4f}, Class Loss={avg_cls:.4f}, Box Loss={avg_box:.4f}")
-                    file.flush()
+                    # file.write(
+                    #     f"Epoch {epochs + 1}: Total Loss={avg_total:.4f}, Class Loss={avg_cls:.4f}, Box Loss={avg_box:.4f}")
+                    # file.flush()
                     # # 在训练循环中直接使用 y_pre 进行可视化
                     # visualize_predictions( original_images, y_pre.detach().cpu(), y_batch.cpu(), visualizations_dir,
                     #                       epochs + 1, num_classes=6, original_sizes=original_sizes )
@@ -250,215 +342,335 @@ class model_train(object):
                     #optimizer.step()#模型参数的更新体现在loss.backward()和optimizer.step()这两个步骤中。
 #loss.backward()计算梯度，optimizer.step()应用这些梯度来更新模型的参数。
         #运用测试集计算更新模型的精确度
-                MAP=self.evaluate_model(validation_dl,model,num_classes,epochs+1);
-                print("Epoch:",epochs+1,"loss:%.5f",loss.item(),"MAP:%.5f",MAP)
-                log_string = "Epoch: %d, loss: %.5f,MAP: %.5f\n" % (epochs + 1, loss.item(), MAP)
+                avg_val_loss,mAP=self.evaluate_model(validation_dl,model,num_classes,epochs+1)
+                # Record evaluation loss and mAP
+                self.eval_losses.append(avg_val_loss)
+                self.eval_maps.append(mAP)
+                print(f"Epoch: {epochs+1}, Train Loss: {avg_train_total_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val mAP: {mAP:.4f}")
+                log_string = f"Epoch: {epochs + 1}, Train Loss: {avg_train_total_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val mAP: {mAP:.4f}\n"
 
-                if MAP > best_accuracy + threshold:
-                    best_accuracy = MAP
+
+                if mAP > best_accuracy + threshold:
+                    best_accuracy = mAP
                     no_improve_epochs = 0
                 # Save the best model
                     torch.save(model, 'best_model.pth')
                     print("New best model saved with MAP: {0:.5f}".format(best_accuracy))
                 else:
                     no_improve_epochs += 1
+                    print(f"Early stopping counter: {no_improve_epochs}/{patience}")
                     if no_improve_epochs >= patience:
                         print("Early stopping triggered.")
                         break
                 #清空显存
-                torch.cuda.empty_cache()
                 scheduler.step()
-            # 打印到控制台
-            # print(log_string.strip())
-            # 写入到文件
+                # Write log to file
                 file.write(log_string)
-
-            # 训练完成后，再次清空显存
-            torch.cuda.empty_cache()
+                file.flush()  # Ensure data is written immediately
+                # Clear GPU cache (optional but can help with memory)
+                torch.cuda.empty_cache()
+            # After training loop finishes, plot the loss and mAP curves
+            self.plot_loss_curves()  # Call the new plotting method
+        # 训练完成后，再次清空显存
+        torch.cuda.empty_cache()
 
     #是怎么评估模型好坏的呢？用验证集！
 
 
     def evaluate_model(self, validation_dl, model, num_classes,epoch, iou_threshold=0.5, device='cuda'):
-        # model.eval()
-        predictions, actuals = [], []  # 初始化空列表
-        per_image_detection = []  # 保存每个图像的预测和真实框信息
+        model.eval() # Set model to evaluation mode
+        # Initialize variables for validation loss calculation
+        total_val_loss = 0
+        total_val_cls_loss = 0 # Optional: log component losses
+        total_val_box_loss = 0 # Optional: log component losses
+        criterion = LossFunc.CustomLoss() # Instantiate loss function
+
         class_predictions = [[] for _ in range(num_classes)]  # 保存预测框（置信度、类别、框）
         class_ground_truth = [[] for _ in range(num_classes)]  # 保存真实框（类别、框）
         batch_idx = 0
-        for x_label, y_label, original_images, original_sizes in validation_dl:
-            x_label, y_label = x_label.to(device), y_label.to(device)  # 将数据移动到指定设备
+        dataset_image_idx_start = (epoch - 1) * len(validation_dl.dataset)
+        print("\n--- Starting Evaluation ---")
+        for x_label, y_label, original_images, original_sizes,scales, pad_xs, pad_ys, padded_sizes in tqdm(validation_dl, desc=f"Evaluating Epoch {epoch}", total=len(validation_dl), ncols=100):
+            x_label = x_label.to(device)
+            # y_label can stay on CPU
+            batch_size, num_anchors, _ = y_label.shape
             with torch.no_grad():
                 y_hat = model(x_label)  # 假设输出形状 (batch_size, num_anchors, num_classes+4)
-                # 对分类预测应用softmax
-               # cls_pred = F.softmax(cls_pred, dim=-1)
+
+                # --- Calculate validation loss for this batch ---
+                # Need to ensure y_label is on the same device as y_hat for loss calculation
+                y_label_device = y_label.to(y_hat.device)
+                val_loss, val_cls_loss, val_box_loss = criterion(y_hat, y_label_device)
+                total_val_loss += val_loss.item()
+                total_val_cls_loss += val_cls_loss.item()  # Optional: accumulate component losses
+                total_val_box_loss += val_box_loss.item()  # Optional: accumulate component losses
+                # Move y_label back to CPU if needed later, or process on device
+                # y_label_device = y_label_device.cpu() # Not strictly needed if processing on device or using y_label.cpu() later
                 # 在每个epoch的第一个batch进行可视化
-                if batch_idx == 0:
-                    visualize_predictions(
-                        original_images,
-                        y_hat.detach().cpu(),
-                        y_label.cpu(),
-                        visualizations_dir,
-                        epoch,  # 现在可以正确传递 epoch
-                        num_classes=7,
-                        original_sizes=original_sizes
+            if batch_idx == 0:
+                print("--- Debugging Visualization Input ---")
+                print("y_batch shape:", y_label.shape)
+
+                # print("y_batch first sample:", y_label[0].cpu().numpy())  # 打印第一个样本的 y_batch
+                print("Original images list length:", len(original_images))
+                print("Original sizes:", original_sizes)
+                print("Scales:", scales)
+                print("Pad Xs:", pad_xs)
+                print("Pad Ys:", pad_ys)
+                print("Padded sizes:", padded_sizes)
+                print("--- End Debugging Visualization Input ---")
+                visualize_predictions(
+                    original_images,# list of numpy arrays
+                    y_hat.detach().cpu().numpy(),
+                    y_label.detach().cpu().numpy(),
+                    visualizations_dir,
+                    epoch,  # 现在可以正确传递 epoch
+                    num_classes=7,
+                    scales=scales,  # list of floats (B,)
+                    pad_xs=pad_xs,  # list of ints (B,)
+                    pad_ys=pad_ys,  # list of ints (B,)
+                    padded_sizes=padded_sizes  # list of tuples (B,)
                     )
-                batch_idx += 1
+            batch_idx += 1
 
-            # 提取分类标签部分并取 argmax
-                actual_cls = y_label[:, :, :num_classes]  # (batch_size, num_anchors, num_classes)
-                actual_boxes = y_label[:, :, num_classes:]  # (batch_size, num_anchors, 4)
-                pred_cls = y_hat[:, :, :num_classes]  # (batch_size, num_anchors, num_classes)
-                pred_boxes = y_hat[:, :, num_classes:]  # (batch_size, num_anchors, 4)
+            # --- Process Predictions and Ground Truth per image for AP/mAP ---
+            actual_cls_batch = y_label.cpu()[:, :, :num_classes]
+            actual_boxes_batch = y_label.cpu()[:, :, num_classes:] # 0-1 in padded size
+            pred_cls_batch = y_hat.detach().cpu()[:, :, :num_classes]
+            pred_boxes_batch = y_hat.detach().cpu()[:, :, num_classes:] # 0-1 in padded size
 
-            # 置信度（每个锚点的最大分类概率）
-                pred_conf, pred_cls_idx = torch.max(pred_cls, dim=2)  # (batch_size, num_anchors)
-                '''torch.max(pred_cls, dim=2)：在分类预测的最后一个维度（类别维度）上取最大值。
-pred_conf：每个锚点的最大分类概率（置信度），形状为 (batch_size, num_anchors)。
-pred_cls_idx：每个锚点的预测类别索引，形状为 (batch_size, num_anchors)。'''
-                batch_size = pred_boxes.shape[0]
-                num_anchors = pred_boxes.shape[1]
 
+            pred_conf_batch = F.softmax(pred_cls_batch, dim=-1)
+            # pred_conf, pred_cls_idx = torch.max(pred_cls, dim=2)  # (batch_size, num_anchors)
             for i in range(batch_size):
-                 # 新增NMS处理逻辑
-    # 提取当前图像的所有预测框和置信度
-                image_boxes = pred_boxes[i]  # [num_anchors, 4]
-                image_scores = pred_conf[i]  # [num_anchors]
-    
-                # 应用NMS (阈值设为0.5)
-                nms_boxes, nms_scores = self.apply_nms(image_boxes.cpu().numpy(), 
-                                         image_scores.cpu().numpy(),
-                                         iou_threshold=0.5)
-                for j in range(len(nms_boxes)):
-                    # 预测框
-                    # pred_box = pred_boxes[i, j].cpu().detach().numpy()
-                    # pred_confidence = pred_conf[i, j].item()
-                    # pred_class = pred_cls_idx[i, j].item()
-                    pred_box = nms_boxes[j]
-                    pred_confidence = nms_scores[j]
-                    class_idx = np.argmax(pred_cls[i, j].cpu().numpy())
+                current_image_id = dataset_image_idx_start + (batch_idx - 1) * batch_size + i
+                orig_w, orig_h = original_sizes[i]
+                scale_i = scales[i]
+                pad_x_i = pad_xs[i]
+                pad_y_i = pad_ys[i]
+                padded_width_i, padded_height_i = padded_sizes[i]
+                original_size_i = (orig_w, orig_h)
+                padded_size_i = (padded_width_i, padded_height_i)
 
-                    # 保存预测框信息
-                    class_predictions[class_idx].append({
-                        'confidence': pred_confidence,
-                        'box': pred_box,
-                        'image_id': i  # 图像 ID，用于区分不同图像
-                    })
-                     # 处理真实框（保持原样）
+                # --- Decode Ground Truth Boxes to Original Pixel Coordinates ---
+                # Use the corrected static method from model_train
+                decoded_actual_boxes_i = self.decode_gt_boxes_to_original(
+                    actual_boxes_batch[i].numpy(),  # 0-1 in padded size
+                    original_size=original_size_i,
+                    padded_size=padded_size_i,
+                    scale=scale_i,
+                    pad_x=pad_x_i,
+                    pad_y=pad_y_i
+                )  # (num_anchors, 4) in original pixels
+
+                # --- Decode Predicted Boxes to Original Pixel Coordinates ---
+                # Assuming pred_boxes_batch are 0-1 in padded size
+                decoded_pred_boxes_i = self.decode_pred_boxes_to_original(
+                    pred_boxes_batch[i].numpy(), # 0-1 in padded size
+                    original_size=original_size_i,
+                    padded_size=padded_size_i,
+                    scale=scale_i,
+                    pad_x=pad_x_i,
+                    pad_y=pad_y_i
+                )  # (num_anchors, 4) in original pixels
+    # 提取当前图像的所有预测框和置信度
                 for j in range(num_anchors):
                      # 真实框
-                    actual_box = actual_boxes[i, j].cpu().detach().numpy()
-                    actual_class = torch.argmax(actual_cls[i, j]).item()
+                     actual_class_j = torch.argmax(actual_cls_batch[i, j]).item()
+                     # Only save ground truths for foreground classes (class_id != 0)
+                     # And ensure it's a valid ground truth (e.g., not all zeros in one-hot, and box is valid)
+                     # A valid box should have x2 > x1 and y2 > y1
+                     box = decoded_actual_boxes_i[j]
+                     is_valid_box = box[2] > box[0] and box[3] > box[1]
 
-                    # 保存真实框信息
-                    class_ground_truth[actual_class].append({
-                        'box': actual_box,
-                        'image_id': i
-                    })
+                     if actual_class_j != BACKGROUND_CLASS and actual_cls_batch[
+                         i, j, actual_class_j] > 0 and is_valid_box:
+                         class_ground_truth[actual_class_j].append({
+                             'box': box,  # Use decoded box in original pixels
+                             'image_id': current_image_id  # Unique image ID
+                         })
+                         # --- Process Predictions for Evaluation ---
+                         # Get confidence and predicted class index for each anchor
+                         # pred_conf_batch is (batch_size, num_anchors, num_classes) after softmax
+                         # pred_cls_idx_batch is (batch_size, num_anchors) from argmax of raw logits (or softmax)
+                         # Let's use the confidence from softmax for the predicted class
+                conf_of_predicted_class_i, pred_cls_idx_i = torch.max(pred_conf_batch[i],dim=1)  # (num_anchors,) , (num_anchors,)
 
-        # 计算每个类别的 AP 和 mAP
-        valid_classes = [i for i in range(1, num_classes)]  # 跳过class 0（背景）
+                         # Filter predictions by confidence threshold
+                confidence_threshold = 0.05  # Set a threshold (e.g., 0.05 or 0.1)
+                high_confidence_mask_tensor = conf_of_predicted_class_i > confidence_threshold#Create boolean mask (PyTorch tensor)
+
+                # 获取高置信度的预测结果 (NumPy 数组)
+                # 使用 PyTorch 张量掩码对 PyTorch 张量进行索引，然后转换为 NumPy
+                high_conf_boxes_np = decoded_pred_boxes_i[high_confidence_mask_tensor.cpu().numpy()]  # 使用 NumPy 掩码对已解码的 NumPy 框进行索引
+                high_conf_scores_np = conf_of_predicted_class_i[high_confidence_mask_tensor].cpu().numpy()
+                high_conf_classes_np = pred_cls_idx_i[high_confidence_mask_tensor].cpu().numpy()
+
+                # Apply NMS per class
+                         # Iterate through predicted classes (including background initially for filtering)
+                for class_id in range(num_classes):
+                             # Filter predictions for the current class
+                    class_mask = (high_conf_classes_np == class_id)
+                    if not np.any(class_mask):
+                        continue
+
+                    boxes_for_nms = high_conf_boxes_np[class_mask]
+                    scores_for_nms = high_conf_scores_np[class_mask]
+                    # original_indices_for_nms = original_indices_to_process[
+                    #              class_mask]  # Keep track of original indices
+
+                             # Apply NMS for this class
+                             # apply_nms returns indices relative to boxes_for_nms
+                    keep_indices_in_class = self.apply_nms(
+                                 boxes_for_nms,
+                                 scores_for_nms,
+                                 iou_threshold=0.5  # NMS IoU threshold
+                             )
+
+                             # Store the predictions that were kept by NMS for this class
+                             # Only store foreground class predictions
+                    if class_id != BACKGROUND_CLASS:
+                        for k in keep_indices_in_class:
+                            # original_anchor_idx = original_indices_for_nms[k]  # Get the original anchor index
+
+                            class_predictions[class_id].append({
+                                         'confidence': scores_for_nms[k].item(),  # Use the score that survived NMS
+                                         'box': boxes_for_nms[k],  # Use the decoded NMS-filtered box
+                                         'image_id': current_image_id  # Unique image ID
+                            })
+
+
+
+        #--- Calculate AP and mAP using collected predictions and ground truths ---
+        valid_classes = [i for i in range(num_classes) if i != BACKGROUND_CLASS]  # 跳过class 0（背景）
         aps = [] #用于存储每个类别的 AP
         all_pred_labels = []
         all_true_labels = []
+        print("\n--- Calculating AP per class ---")
         for class_id in valid_classes:
             # 获取当前类别的预测和真实框
             preds = class_predictions[class_id]
             gts = class_ground_truth[class_id]
 
+            print(f"Class {class_id}: {len(preds)} predictions, {len(gts)} ground truths")
+
             if len(gts) == 0:
                 aps.append(-1)  # 如果没有真实框，AP 设置为 -1 表示无效
+                ap = 0.0
+                print(f"Class {class_id} has no ground truth instances.")
                 continue
-
-            # 统计所有真实框
-            all_gts = [(gt['box'], gt['image_id']) for gt in gts]
-
-            # 统计所有预测框
-            all_preds = [(pred['confidence'], pred['box'], pred['image_id']) for pred in preds]
-
-            # 排序预测框（按置信度降序）
-            all_preds_sorted = sorted(all_preds, key=lambda x: x[0], reverse=True)
-
-            # 初始化 TP 和 FP
-            tp = np.zeros(len(all_preds_sorted))
-            fp = np.zeros(len(all_preds_sorted))
-
-            # 标记已经匹配的真实框
-            matched_gts = set()
-
-            # 遍历每个预测框
-            for idx, (conf, pred_box, image_id) in enumerate(all_preds_sorted):
-                matched = False
-                # 遍历当前图像的真实框
-                for k, (gt_box, gt_image_id) in enumerate(all_gts):
-                    if gt_image_id == image_id and k not in matched_gts:
-                        iou = self.compute_iou(pred_box, gt_box)
-                        if iou >= iou_threshold:
-                            matched = True
-                            # 防止重复匹配
-                            matched_gts.add(k)
-                            break
-                if matched:
-                    tp[idx] = 1
-                    all_pred_labels.append(class_id)
-                    all_true_labels.append(class_id)
-                else:
-                    fp[idx] = 1
-                    all_pred_labels.append(class_id)
-                    all_true_labels.append(-1)  # 表示负样本
-
-
-            # 计算 Precision 和 Recall
-            cumsum_tp = np.cumsum(tp)
-            cumsum_fp = np.cumsum(fp)
-            precision = cumsum_tp / (cumsum_tp + cumsum_fp + 1e-8)
-            recall = cumsum_tp / len(gts)
-             # 添加对单点或空预测的处理
-            if len(precision) == 0 or len(recall) == 0:
-                print(f"Class {class_id} 完全无预测数据")
+            elif len(preds) == 0:
+                # If no predictions but has ground truths, Recall will always be 0 -> AP is 0
                 ap = 0.0
-                valid_samples = 0
-            elif len(precision) < 2 or len(recall) < 2:
-                print(f"Class {class_id} 有效数据点不足（仅{len(precision)}个）")
-                ap = 0.0
-                valid_samples = 0
+                print(f"Class {class_id} has {len(gts)} GTs but no predictions.")
             else:
-                ap = self.calculate_AP(precision, recall)
-                valid_samples = len(gts)
+                # --- Standard AP Calculation ---
+                # Format predictions: list of (confidence, box, image_id)
+                all_preds_sorted = sorted(preds, key=lambda x: x['confidence'], reverse=True)
 
-            # 统一绘图逻辑（增加多维检查）
-            if valid_samples > 0 and len(precision) >= 2 and len(recall) >= 2 and ap > 0:
+                # Format ground truths: list of (box, image_id)
+                all_gts_list = [(gt['box'], gt['image_id']) for gt in gts]
+
+                tp = np.zeros(len(all_preds_sorted))
+                fp = np.zeros(len(all_preds_sorted))
+
+                # Use a set to track matched GTs per image to avoid double counting
+                matched_gts_per_image = {}  # {image_id: set of indices in all_gts_list}
+
+                # Iterate through sorted predictions
+                for idx, pred in enumerate(all_preds_sorted):
+                    conf, pred_box, image_id = pred['confidence'], pred['box'], pred['image_id']
+
+                    best_iou = 0
+                    best_gt_idx_in_list = -1  # Index within all_gts_list
+
+                    # Find the best matching UNMATCHED ground truth in the same image
+                    # Iterate through ground truths for this class
+                    for gt_idx_in_list, (gt_box, gt_image_id) in enumerate(all_gts_list):
+                        if gt_image_id == image_id:  # Only consider GTs in the same image
+                            # Check if this specific GT instance has already been matched by a higher confidence prediction
+                            if image_id not in matched_gts_per_image:
+                                matched_gts_per_image[image_id] = set()
+
+                            if gt_idx_in_list not in matched_gts_per_image[image_id]:  # Only consider unmatched GTs
+                                iou = self.compute_iou(pred_box, gt_box)
+                                if iou > best_iou:  # Find highest IoU
+                                    best_iou = iou
+                                    best_gt_idx_in_list = gt_idx_in_list  # Store index in all_gts_list
+
+                    # Determine if it's a TP or FP
+                    if best_iou >= iou_threshold:
+                        # It's a TP if the best match is above threshold and the GT hasn't been matched yet
+                        if image_id not in matched_gts_per_image:
+                            matched_gts_per_image[image_id] = set()
+
+                        if best_gt_idx_in_list != -1 and best_gt_idx_in_list not in matched_gts_per_image[image_id]:
+                            tp[idx] = 1  # This prediction is a true positive
+                            matched_gts_per_image[image_id].add(best_gt_idx_in_list)  # Mark this GT as matched
+                        else:
+                            # This prediction overlaps a matched GT but wasn't the highest confidence -> False Positive
+                            # This is correct according to standard evaluation protocols
+                            fp[idx] = 1
+                            # print(f"Debug FP (Matched GT): Prediction for class {class_id} on image {image_id} IoU {best_iou:.2f} found matched GT index {best_gt_idx_in_list}, but GT already matched.")
+
+                    else:
+                        # No match above threshold -> False Positive
+                        fp[idx] = 1
+                        # print(f"Debug FP (Low IoU): Prediction for class {class_id} on image {image_id} IoU {best_iou:.2f} below threshold {iou_threshold}.")
+
+                # 计算 Precision 和 Recall
+                cumsum_tp = np.cumsum(tp)
+                cumsum_fp = np.cumsum(fp)
+                precision = cumsum_tp / (cumsum_tp + cumsum_fp + 1e-8)
+                # Recall = TP / Total number of ground truths for this class
+                total_gt_for_class = len(gts)
+                recall = cumsum_tp / (total_gt_for_class + 1e-8)
+                # Calculate AP
                 try:
-                    # 添加输入校验
-                    assert len(recall) == len(precision), "Recall与Precision长度不一致"
-                    
-                    plt.figure(figsize=(8, 6))
-                    auc_value = auc(recall, precision)
-                    plt.plot(recall, precision, 
-                            label=f'Class {class_id} (AUC={auc_value:.2f}, AP={ap:.2f})')
-                    plt.xlabel('Recall')
-                    plt.ylabel('Precision')
-                    plt.title(f'Class {class_id} PR曲线 (有效样本:{valid_samples})')
-                    plt.legend(loc='lower left')
-                    plt.savefig(f"./image/pr_curve_class_{class_id}.png", dpi=300, bbox_inches='tight')
-                    plt.close()
+                    ap = self.calculate_AP(recall, precision)
+                    print(f"Class {class_id} AP: {ap:.4f}")
                 except Exception as e:
-                    print(f"绘制类别 {class_id} PR曲线失败: {str(e)}")
-                    ap = 0.0  # 失败时重置AP
+                    print(f"Error calculating AP for class {class_id}: {e}")
+                    ap = 0.0  # Set AP to 0 if calculation fails
+
+
+            # Plot PR curve if valid data exists
+                if len(precision) > 1 and len(recall) > 1 and total_gt_for_class > 0:
+                    try:
+                        plt.figure(figsize=(8, 6))
+                        plt.plot(recall, precision, label=f'Class {class_id} (AP={ap:.4f})')
+                        plt.xlabel('Recall')
+                        plt.ylabel('Precision')
+                        plt.title(f'Class {class_id} PR Curve (Total GT: {total_gt_for_class})')
+                        plt.ylim(0.0, 1.05)
+                        plt.xlim(0.0, 1.05)
+                        plt.legend(loc='lower left')
+                    # Make sure visualizations_dir exists
+                        plt.savefig(f"./image/pr_curve_class_{class_id}.png", dpi=300, bbox_inches='tight')
+                        plt.close()
+                    except Exception as e:
+                        print(f"绘制类别 {class_id} PR曲线失败: {str(e)}")
 
             aps.append(ap)  # 确保所有情况都记录AP值
 
 
         # 计算 mAP
-        valid_aps = [ap for ap in aps if ap != -1]
-        mAP = sum(valid_aps) / len(valid_aps) if valid_aps else 0.0
+        aps_with_gt = [aps[i] for i, class_id in enumerate(valid_classes) if len(class_ground_truth[class_id]) > 0]
+        mAP = sum(aps_with_gt) / len(aps_with_gt) if len(aps_with_gt) > 0 else 0.0
+        print(f"\nEpoch {epoch} mAP: {mAP:.4f}")
+
+        # --- Calculate Average Validation Loss ---
+        avg_val_total_loss = total_val_loss / len(validation_dl)
+        # avg_val_cls_loss = total_val_cls_loss / len(validation_dl) # Optional: log component losses
+        # avg_val_box_loss = total_val_box_loss / len(validation_dl)
+        print(f"Epoch {epoch} Validation Loss: {avg_val_total_loss:.4f}")
 
         # 计算混淆矩阵
-        label_names = ['missing_hole', 'mouse_bite', 'open_circuit', 'short', 'spur', 'spurious_copper']
-        cm = confusion_matrix(all_true_labels, all_pred_labels, labels=valid_classes)
-        self.plot_confusion_matrix(cm, label_names)
-        print(f"正在评估类别 {class_id}，真实框数量：{len(gts)}")  # 应显示1-6类
-        return mAP
+        # label_names = ['missing_hole', 'mouse_bite', 'open_circuit', 'short', 'spur', 'spurious_copper']
+        # cm = confusion_matrix(all_true_labels, all_pred_labels, labels=valid_classes)
+        # self.plot_confusion_matrix(cm, label_names)
+        # print(f"正在评估类别 {class_id}，真实框数量：{len(gts)}")  # 应显示1-6类
+        return avg_val_total_loss,mAP
 
     def plot_confusion_matrix(self, cm, label_names, title='Confusion matrix', cmap=plt.cm.Reds):
         plt.close('all')
@@ -477,7 +689,48 @@ pred_cls_idx：每个锚点的预测类别索引，形状为 (batch_size, num_an
         plt.savefig("./image/confusion_matrix.png", dpi=300, bbox_inches='tight')
         plt.close()
 
+    # --- New method to plot loss and mAP curves ---
+    def plot_loss_curves(self):
+        """Plots the training and validation loss curves and validation mAP curve."""
+        # Ensure visualizations_dir exists
+        if not os.path.exists(visualizations_dir):
+            os.makedirs(visualizations_dir)
 
+        epochs_range = range(1, len(self.train_losses) + 1)
+
+        # Plot Loss Curves
+        if self.train_losses or self.eval_losses: # Check if lists are not empty
+            plt.figure(figsize=(10, 6))
+            if self.train_losses:
+                 plt.plot(epochs_range, self.train_losses, label='Train Loss')
+            if self.eval_losses:
+                 plt.plot(epochs_range, self.eval_losses, label='Validation Loss', color='orange')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Training and Validation Loss per Epoch')
+            plt.legend()
+            plt.grid(True)
+            loss_curve_path = os.path.join(visualizations_dir, "loss_curve.png")
+            plt.savefig(loss_curve_path, dpi=300)
+            plt.close()
+        else:
+            print("No loss data to plot.")
+
+
+        # Plot mAP Curve
+        if self.eval_maps: # Check if list is not empty
+            plt.figure(figsize=(10, 6))
+            plt.plot(epochs_range, self.eval_maps, label='Validation mAP', color='green')
+            plt.xlabel('Epoch')
+            plt.ylabel('mAP')
+            plt.title('Validation mAP per Epoch')
+            plt.legend()
+            plt.grid(True)
+            mAP_curve_path = os.path.join(visualizations_dir, "map_curve.png")
+            plt.savefig(mAP_curve_path, dpi=300)
+            plt.close()
+        else:
+            print("No mAP data to plot.")
 if __name__=='__main__':
     print("build model")#imghimgw是1600x3040，inchannel是3，patchsize是160，embeddim是768
     #这里要写model.py的transformer函数，然后引import img_size=(1600,3040) ,
@@ -485,8 +738,8 @@ if __name__=='__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model_transformer=model.model(embed_dim=Embeding_dim,norm_layer=None,num_heads=4,hideF=256,
-                     Pyin_channels=Embeding_dim,Pyout_channels=32,
-                 num_classes=7,num_anchors=6,Netdepth=Netdepth) #Fimg看pyramid用例
+                     Pyin_channels=Embeding_dim,Pyout_channels=256,
+                 num_classes=7,num_anchors=Num_Anchors,Netdepth=Netdepth) #Fimg看pyramid用例
     # 将模型转换为半精度 (FP16)
     #model_transformer=model_transformer.half()
     # 将模型移动到 GPU

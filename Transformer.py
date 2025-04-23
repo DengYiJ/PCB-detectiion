@@ -136,10 +136,10 @@ class SparseAttention(nn.Module):
     # @torch.amp.autocast(device_type='cuda')
     def forward(self, x):
 
-        if self.downsample and x.shape[1] > 4096:
-            x = x.transpose(1, 2)
-            x = self.downsample(x)
-            x = x.transpose(1, 2)
+        # if self.downsample and x.shape[1] > 4096:
+        #     x = x.transpose(1, 2)
+        #     x = self.downsample(x)
+        #     x = x.transpose(1, 2)
 
         B, N, C = x.shape
         # print(f"x shape: {x.shape}, dtype: {x.dtype}")

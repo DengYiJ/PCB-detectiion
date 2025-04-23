@@ -182,6 +182,77 @@ class PatchEmbedding2(nn.Module):
             nn.init.kaiming_normal_(self.proj.weight, mode='fan_out', nonlinearity='relu')
             if self.proj.bias is not None:
                 nn.init.constant_(self.proj.bias, 0)
+
+
+# class OverlapPatchEmbed(nn.Module):
+#     """ Image to Patch Embedding
+#     """
+#     def __init__(self, patch_size=7, stride=4, in_chans=3, embed_dim=768):
+#         super().__init__()
+#         patch_size = to_2tuple(patch_size)
+#         assert max(patch_size) > stride, "Set larger patch_size than stride"
+#         self.patch_size = patch_size
+#         self.proj = nn.Conv2d(
+#             in_chans, embed_dim, patch_size,
+#             stride=stride, padding=(patch_size[0] // 2, patch_size[1] // 2))
+#         self.norm = nn.LayerNorm(embed_dim)
+#
+#     def forward(self, x):  # (1,3,224,224)
+#         x = self.proj(x)  # (1,64,56,56)
+#         x = x.permute(0, 2, 3, 1)  # (1,56,56,64)
+#         x = self.norm(x)
+#         return x
+
+class FixedPatchEmbedding4x4(nn.Module):
+    def __init__(self, embed_dim=768, norm_layer=None):
+        super(FixedPatchEmbedding4x4, self).__init__()
+        self.patch_size = (4, 4)  # 固定为4x4
+        self.embed_dim = embed_dim
+        self.norm_layer = norm_layer
+        
+        # 初始化参数
+        self.in_channels = None
+        self.proj = None
+        self.norm = None
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        
+        # 确保输入能被4整除
+        pad_h = (4 - H % 4) % 4
+        pad_w = (4 - W % 4) % 4
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h))
+        
+        # 动态初始化投影层
+        if self.in_channels != C or self.proj is None:
+            self.in_channels = C
+            self.proj = nn.Conv2d(
+                self.in_channels, 
+                self.embed_dim, 
+                kernel_size=4, 
+                stride=4
+            ).to(x.device)
+        
+        # 初始化归一化层
+        if self.norm is None:
+            if self.norm_layer is not None:
+                self.norm = self.norm_layer(self.embed_dim)
+            else:
+                self.norm = nn.Identity()
+            self.norm = self.norm.to(x.device)
+        
+        # 计算patch数量
+        grid_size = (H // 4, W // 4)
+        num_patches = grid_size[0] * grid_size[1]
+        
+        # 投影和reshape
+        x = self.proj(x)  # [B, embed_dim, grid_h, grid_w]
+        x = x.flatten(2).transpose(1, 2)  # [B, num_patches, embed_dim]
+        x = self.norm(x)
+        
+        return x
+
 def test_PEb1():
     # 设置超参数
     # 示例使用
@@ -190,13 +261,14 @@ def test_PEb1():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # print(f"Using device: {device}")
     patch_embed = PatchEmbedding1(embed_dim=Embeding_dim) # 不指定 in_channels 和 patch_size
-    patch_embed=patch_embed
+    patch_embed1 = FixedPatchEmbedding4x4(embed_dim=256)
     patch_embedcuda=patch_embed.to(device)
+    patch_embedcuda1=patch_embed1.to(device)
     # 输入张量
-    x = torch.randn(1, 3, 224, 224).to(device) #成功移到GPU上，输入FP32，启动混合精度输出变成FP16
+    x = torch.randn(1, 512, 32, 32).to(device) #成功移到GPU上，输入FP32，启动混合精度输出变成FP16
     # print(f"x  tensor dtype: {x.dtype}")
-    x = patch_embedcuda(x)  # 输出形状为 [8, 1024, 196]
-
+    x = patch_embedcuda1(x)  # 输出形状为 [8, 1024, 196]
+    print(f"x  tensor shape: {x.shape}")
     for name, param in  patch_embedcuda.named_parameters():  # 打印ff模块的模型参数
         print(f"Parameter '{name}' dtype: {param.dtype}")
 
