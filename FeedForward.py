@@ -4,10 +4,10 @@ import torch.nn.functional as F
 from torch import autocast
 
 
-class FeedForward(nn.Module):#in_features就是embed_dim 768,attention输出torch.randn(4, 163, 768)
+class ffn(nn.Module):#in_features就是embed_dim 768,attention输出torch.randn(4, 163, 768)
     def __init__(self, in_features, hidden_features=256, out_features=None,
                  act_layer=nn.GELU, drop=0.5, use_layernorm=True):
-        super(FeedForward, self).__init__()
+        super(ffn, self).__init__()
         self.in_features = in_features
         self.hidden_features = hidden_features or in_features
         self.out_features = out_features or in_features

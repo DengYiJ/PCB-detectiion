@@ -195,13 +195,13 @@ def apply_augmentations(image, bboxes, class_names):
 def augment_dataset(image_dir, xml_dir, output_dir, augment_count, max_attempts=10):
     os.makedirs(os.path.join(output_dir, "images"), exist_ok=True)
     os.makedirs(os.path.join(output_dir, "annotations"), exist_ok=True)
-
+    print(f"start")
     image_files = [f for f in os.listdir(image_dir) if f.endswith(".jpg")]
-
+    # print(f"image_files: {image_files}")
     for image_file in image_files:
         image_path = os.path.join(image_dir, image_file)
         xml_path = os.path.join(xml_dir, image_file.replace(".jpg", ".xml"))
-
+        # print("flag")
         if not os.path.exists(xml_path):
             print(f"Warning: No XML annotation found for {image_file}. Skipping...")
             continue
@@ -240,12 +240,12 @@ def augment_dataset(image_dir, xml_dir, output_dir, augment_count, max_attempts=
 
             if attempts >= max_attempts:
                 print(f"Warning: Skipped {image_file}_aug_{i + 1} after {max_attempts} attempts: No valid bboxes")
-
-
-augment_dataset(
-    image_dir=r"D:\PycharmProjects\PCB\data\images",
-    xml_dir=r"D:\PycharmProjects\PCB\data\Annotations",
-    output_dir=r"D:\PycharmProjects\PCB\data\output",
+        print(f"end")
+if __name__ == "__main__":
+    augment_dataset(
+    image_dir=r"E:/Dengyijun/GruaduationProject/PCB_DATASET/images/Missing_hole",
+    xml_dir=r"E:/Dengyijun/GruaduationProject/PCB_DATASET/Annotations/Missing_hole",
+    output_dir=r"E:/Dengyijun/GruaduationProject/PCB_DATASET/aug",
     augment_count=6,
-    max_attempts=10
-)
+    max_attempts=30
+    )

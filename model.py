@@ -5,39 +5,50 @@ import torch.nn as nn
 from torch import autocast
 import Pyramid
 import PatchEmbedding
-import PositionEmbedding
-import FeedForward
+from PositionEmbedding import PositionEmbeddingStatic
+from FeedForward import ffn
 import SelectiveKernelConv
 import FulllyConnectedLayer
+from PatchEmbedding import FixedPatchEmbedding4x4
 from Transformer import SparseAttention
 import torch.nn.functional as F
 from local_aggre import LocalAggregation
 from LocalPropagation import LocalPropagation
-from resnet_34 import ResNet34_FeatureExtractor
+from resnet_34 import ResNet34FeatureExtractor
 from SRA import SpatialReductionAttention
 class MNT(nn.Module):
-    def __init__(self,embed_dim,norm_layer,hideF,num_heads,device='cuda'): #imghimgw是1600x3040，inchannel是3，patchsize是160，embeddim是768
+    def __init__(self,Height,Width,in_channels,embed_dim,norm_layer,hideF,num_heads,device='cuda'): #imghimgw是1600x3040，inchannel是3，patchsize是160，embeddim是768
         super().__init__()
         self.device = device
-        # self.sra_dim = sra_dim
-        self.patch_embedding=PatchEmbedding.PatchEmbedding1(embed_dim=embed_dim,norm_layer=norm_layer).to(self.device)
-        self.patch_embedding4x4=PatchEmbedding.FixedPatchEmbedding4x4(embed_dim=embed_dim,norm_layer=norm_layer).to(self.device)
-        self.sparse_attention=SparseAttention(dim=embed_dim,num_heads=num_heads,window_size=64,block_size=16).to(self.device)    # num_patches = self.patch_embedding.num_patches
+        self.Height = Height
+        self.Width = Width
+        self.embed_dim = embed_dim  # 存储共同的嵌入维度
+        self.num_heads = num_heads
+        self.hideF = hideF
+        self.in_channels = in_channels
+        self.precomputed_shapes = {}  # 新增缓存字典
+        self.need_reshape = True
+        # --- 为每个 ResNet 输出层定义 PatchEmbedding/投影层 ---
+        # 使用 nn.ModuleList 存储不同层的投影模块
+        self.patch_embedding=FixedPatchEmbedding4x4(in_channels=self.in_channels, embed_dim=self.embed_dim, norm_layer=nn.LayerNorm).to(self.device)
+        # --- PatchEmbedding定义结束---
+        self.num_patches = self.Height * self.Width // 16
+        self.position_embedding=PositionEmbeddingStatic(num_features=self.embed_dim,num_patches=self.num_patches).to(self.device)
+        # --- 空间缩减注意力机制 ---
         self.sra = SpatialReductionAttention(
-            dim=embed_dim,
-            # dim=self.sra_dim,
-            num_heads=num_heads,
+            dim=self.embed_dim,
+            num_heads= self.num_heads,
             sr_ratio=2  # 可根据特征图大小调整
         ).to(self.device)
-        self.feedforward=FeedForward.FeedForward(in_features=embed_dim,hidden_features=hideF,out_features=embed_dim,drop=0.1).to(self.device)
+        # --- 空间缩减注意力机制定义结束 ---
+
+        self.feedforward=ffn(in_features=self.embed_dim,hidden_features=self.hideF,out_features=self.embed_dim,drop=0.1).to(self.device)
         self.local_agg=LocalAggregation(embed_dim).to(self.device)
         self.local_pro=LocalPropagation(embed_dim).to(self.device)
         # 在 MNT 模块中添加 Batch Normalization
         self.bn1 = nn.BatchNorm1d(embed_dim).to(self.device)
         self.bn2 = nn.BatchNorm1d(embed_dim).to(self.device)
         # 添加形状转换标志
-        self.need_reshape = True
-        self.precomputed_shapes = {}  # 新增缓存字典
         self.layer_norm1 = nn.LayerNorm(embed_dim).to(self.device)  # 添加层归一化操作
         # self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
     def _reshape_to_bchw(self, x):
@@ -67,7 +78,7 @@ class MNT(nn.Module):
     def forward(self, input):
         # print("input device:", input.device)
         # B, C, H, W = input.shape
-        x=self.patch_embedding4x4(input)
+        x=self.patch_embedding(input)
         # print(f"pae:{x.shape}")
         identity = x.clone()
         identity = identity.to(input.device)
@@ -83,9 +94,8 @@ class MNT(nn.Module):
         # x=identity+x
         # ----------先不做本地增强------------------------
         # 动态创建 PositionEmbedding
-        position_embedding = PositionEmbedding.PositionEmbeddingStatic(num_features=num_features,num_patches=num_patches).to(self.device)
         # x = position_embedding(x.to(position_embedding.cls_token.device))#确保 x 被移动到了与 cls_token 相同的设备上
-        x = position_embedding(x)
+        x = self.position_embedding(x)
         # print(f"poe:{x.shape}")
         # print(f"After poe tensor dtype: {x.dtype}")
         #print("x device:", x.device)
@@ -285,7 +295,7 @@ class ADD(nn.Module):
  # 分类头调整
         self.class_head = nn.Sequential(
             nn.Linear(128, num_anchors * num_classes),
-            nn.Softmax(dim=-1) if num_classes > 1 else nn.Sigmoid()
+            # nn.Softmax(dim=-1) if num_classes > 1 else nn.Sigmoid()
         )
         
         # 回归头调整
@@ -298,15 +308,15 @@ class ADD(nn.Module):
     def forward(self, x):
         # print(f"[ADD] Input shape: {x.shape}, dtype: {x.dtype}, device: {x.device}")  # 检查输入状态[2](@ref) fp32
         assert not torch.isnan(x).any(), "NaN in ADD input"
-        x=self.fcl(x)
+        # x=self.fcl(x)
         # x = self.channel_reduce(x)       # [B, 128, 1, 1]
         # print(f"[ADD] After fcl: shape={x.shape}, min={x.min():.3f}, max={x.max():.3f}")  # 监测全连接层输出范围[1]
         # SKConv 前检查 NaN/Inf
         assert not torch.isnan(x).any(), "NaN detected before SKConv!"
         assert not torch.isinf(x).any(), "Inf detected before SKConv!"
-        x = x.view(x.size(0), self.target_channels, self.target_h, self.target_w)
+        # x = x.view(x.size(0), self.target_channels, self.target_h, self.target_w)
         # 3. 通道扩展
-        x = self.channel_expand(x)  # [B, 8, 8, 8] -> [B, 64, 16, 16]
+        # x = self.channel_expand(x)  # [B, 8, 8, 8] -> [B, 64, 16, 16]
         # for name, param in self.skc.named_parameters():  # 打印ff模块的模型参数
         #     print(f"skc Parameter '{name}' dtype: {param.dtype}")
         # for name, param in self.skc.named_parameters():
@@ -358,43 +368,68 @@ def testADD():
 class model(nn.Module):
     def __init__(self,embed_dim,norm_layer,num_heads,hideF,
                  Pyin_channels,Pyout_channels,
-                 num_classes,num_anchors,Netdepth,device='cuda'):
+                 num_classes,num_shapes_per_location=6,add_in_channel=49152,device='cuda'):
         super().__init__()
         self.device = device
-        self.mnt=MNT(embed_dim,norm_layer,hideF,num_heads).to(self.device)# MNT返回最终的输出特征x，形状为 (B, N, C)
-        # 替换单个MNT为ModuleList
-        self.mnt_modules = nn.ModuleList([
-            MNT(embed_dim, norm_layer, hideF, num_heads).to(device)
-            for _ in range(5)  # 假设需要处理5个特征图
-        ])
-        self.pyramid=pyramid(Pyin_channels,Pyout_channels).to(self.device) #返回最终的输出特征list,b1-b6 #特别的，in channels是embed_dim
+        self.num_shapes_per_location = num_shapes_per_location
         self.num_classes=num_classes
-        self.num_anchors=num_anchors
-        self.downsample_layers = ResNet34_FeatureExtractor().to(device)
+        self.embed_dim = embed_dim
+        self.num_heads=num_heads
+        self.hideF=hideF
+        self.resnet_feature_info_list = [
+            (64, 256, 256),  # Layer 1 输出: (channels, H, W)
+            (64, 256, 256),  # Layer 2 输出
+            (128, 128, 128),  # Layer 3 输出
+            (256, 64, 64),  # Layer 4 输出
+            (512, 32, 32)  # Layer 5 输出
+        ]
+
+        #-----定义骨干网络ResNet-34-----
+        self.backbone=ResNet34FeatureExtractor().to(device)
+        # -----结束-----
+
+        #----------定义5种适配resnet维度的MNT---------
+        self.mnt_modules=nn.ModuleList()
+        for in_channels,H,W in self.resnet_feature_info_list:
+             self.mnt_modules.append(
+                 MNT(
+                     Height=H,
+                     Width=W,
+                     in_channels=in_channels, # 传递当前尺度的输入通道数
+                     embed_dim=self.embed_dim, # 传递共同的输出维度
+                     norm_layer=nn.LayerNorm, # 根据你的 PatchEmbedding 需要
+                     hideF=self.hideF,
+                     num_heads=self.num_heads,
+                 ).to(self.device)
+             )
+        #---------MNT定义结束---------------
+
+        # ----------定义特征金字塔---------
+        self.pyramid=pyramid(Pyin_channels,Pyout_channels).to(self.device) #返回最终的输出特征list,b1-b6 #特别的，in channels是embed_dim
+        # ----------定义特征金字塔结束---------
+
+
+        if add_in_channel is None:
+            # 在 __init__ 中计算 add_in_channel 比较复杂，通常需要知道前面模块的输出尺寸
+            # 简单起见，如果测试表明它是 167936，可以直接在这里使用
+            add_in_channel = 32768  # 这是一个示例值，你需要根据你的实际网络结构和输入确定
+            print(f"Warning: add_in_channel not provided, using assumed value: {add_in_channel}")
+
+        # # ----------定义ADD---------
+        # self.ADD = ADD(add_in_channel=add_in_channel, num_anchors=self.num_anchors,
+        #                num_classes=self.num_classes).to(self.device)
+        # ----------定义ADD结束--------
+
         self.classification_head=nn.Sequential(
-            # nn.Linear(128, 256),  # 增加特征维度
-            nn.Conv2d(Pyout_channels, 256, kernel_size=3, padding=1),
+            nn.Conv2d(480, 256, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),  # 添加全局平均池化层
-            nn.Flatten(),  # 扁平化特征图
-            nn.Linear(256, num_anchors * num_classes),
-            # nn.Conv2d(256, num_anchors * num_classes, kernel_size=1, padding=0) # 输出 num_classes * num_anchors
-            # nn.Sigmoid()  # 确保输出在0-1范围内
-            # nn.Unflatten(-1, (num_anchors, num_classes))  # 重塑为 (batch, num_anchors, num_classes)
+            nn.Conv2d(256, self.num_shapes_per_location*self.num_classes, kernel_size=3, padding=1),
         ).to(self.device)
         # 修改边界框预测头部
         self.bbox_head = nn.Sequential(
-            # nn.Linear(128, 128),
-            nn.Conv2d(Pyout_channels, 256, kernel_size=3, padding=1),
+            nn.Conv2d(480, 256, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            # nn.Conv2d(256, num_anchors * 4, kernel_size=1, padding=0),  # 输出 4 * num_anchors
-            nn.Flatten(),  # 扁平化特征图
-            nn.Linear(256, num_anchors * 4),  #
-            nn.Sigmoid()  # 确保输出在0-1范围内
+            nn.Conv2d(256, self.num_shapes_per_location*4, kernel_size=3, padding=1),
         ).to(self.device)
 
         # 转换权重为float32
@@ -409,10 +444,16 @@ class model(nn.Module):
                 module.bias.data = module.bias.data.float()
 
         self.softmax = nn.Softmax(dim=-1)  # 添加 softmax 激活函数
-
+        self.skc = SelectiveKernelConv.SKConv(
+            features=self.embed_dim*5,  # 输入通道数来自 B,C,H,W
+            WH=64  ,# 输入特征图的空间维度
+            M=2,  # 分支数量（通常取 2 或 3）
+            G=8,  # 卷积组的数量（通常取 8 或 16）
+            r=8).to(self.device)  # 压缩倍数（通常取 8 或 16）
+        # 添加后处理层
     # @autocast('cuda')
     def forward(self, x):
-        resnet34_features = self.downsample_layers(x)#返回列表
+        resnet34_features = self.backbone(x)#返回列表
         mnt_outputs_bchw = []
         for i, feat in enumerate(resnet34_features):
             # print(f"resnet output shape: {feat.shape}")
@@ -420,61 +461,48 @@ class model(nn.Module):
             # print(f"bchw shape: {bchw_output.shape}")
             mnt_outputs_bchw.append(bchw_output)
 
+        # feature_list 是一个包含 5 个特征图的列表，来自 pyramid 模块的输出
         feature_list = self.pyramid(mnt_outputs_bchw)
         # 打印 feature_list 中每个张量的数据类型
         # for i, feature in enumerate(feature_list):
-        #     print(f"feature_list[{i}] tensor dtype: {feature.dtype},eature_list[{i}] tensor shape:{feature.shape}")
+        #     print(f"feature_list[{i}] tensor dtype: {feature.dtype},feature_list[{i}] tensor shape:{feature.shape}")
         # flattened_features = [torch.flatten(feature, start_dim=1) for feature in feature_list]#每个特征图被展平成一个二维张量，其中第一维度是批量大小（B），第二维度是所有其他维度的乘积。
+            # 处理 feature_list: 自适应池化到 64x64 并沿通道拼接
         processed_features = []
-        for i, feature in enumerate(feature_list):
-            B, C, H, W = feature.shape
-        
-        # 根据特征图尺寸选择降维方式
-            if H >= 128:  # 大特征图
-            # 先MaxPooling降维到1/4
-            #     pooled = F.max_pool2d(feature, kernel_size=4, stride=4)
-                pooled = F.adaptive_avg_pool2d(feature, (16, 16))
-                # print(f"After maxpool(4x4): {pooled.shape}")
-                flattened = torch.flatten(pooled, start_dim=1)
-            elif H >= 32:  # 中等特征图
-            # 先MaxPooling降维到1/2
-            #     pooled = F.max_pool2d(feature, kernel_size=2, stride=2)
-                pooled = F.adaptive_avg_pool2d(feature, (8, 8))
-                # print(f"After maxpool(2x2): {pooled.shape}")
-                flattened = torch.flatten(pooled, start_dim=1)
-            else:  # 小特征图
-            # 直接FC降维
-                flattened = torch.flatten(feature, start_dim=1)
-                # print(f"After NOTHING: {pooled.shape}")
-            processed_features.append(flattened)
-        
-        concatenated_features = torch.cat(processed_features, dim=1)#将所有展平后的特征按列（dim=1）拼接起来。拼接后的张量形状为 [2, 96*5 +24]。
-        # print(f"concat fea:{concatenated_features.shape}")
-        assert not torch.isnan(concatenated_features).any(), "NaN detected before ADD module!"
-        # print(f"concat fea:{concatenated_features.shape}")#concat fea:torch.Size([2, 167936])
-       #concatenated_features->torch.Size([2, 504])
-        #print("flattened_features shapes:")
-        # for feat in flattened_features:
-        #     print(feat.shape)
-        #print(f"concatenated_features shape: {concatenated_features.shape}")
-        # print(f"concat tensor dtype: {concatenated_features.dtype}") #concat tensor FP32
-            #调用ADD
-        #调用concatenated_features的第二维度作为ADD初始化in_channels的形参
-        #concatenated_features.half()
-        self.ADD=ADD(add_in_channel=concatenated_features.shape[1],num_anchors=self.num_anchors,num_classes=self.num_classes)
-        # self.ADD=self.ADD.to(self.device).half()#必须half否则权重为FP32
-        self.ADD = self.ADD.to(self.device)
-        # for name, param in self.ADD.named_parameters():  # 打印ff模块的模型参数
-        #     print(f"Parameter '{name}' dtype: {param.dtype}")
-    # #    print(f"concat half dtype: {concatenated_features.half().dtype}")#concat half fp16
-        # add_output=self.ADD(concatenated_features)# 输出FP32,估计是因为3个FP16和2个FP32相加，最后形成FP32了
-        cls,bbox=self.ADD(concatenated_features)  #Classification prediction shape: torch.Size([2, 42]) Bounding box prediction shape: torch.Size([2, 24])
-         # 调整输出形状
-        cls = cls.view(-1, self.num_anchors, self.num_classes)  # [B, num_anchors, num_classes]
-        bbox = bbox.view(-1, self.num_anchors, 4)              # [B, num_anchors, 4]
-        
-        # 合并预测结果
-        y_pred = torch.cat([cls, bbox], dim=-1)  # [B, num_anchors, num_classes+4]
+        for feature in feature_list:
+                # 使用自适应平均池化将每个特征图的空间尺寸调整到 64x64
+                # feature 的形状是 [B, C, H, W]，池化后是 [B, C, 64, 64]
+            pooled_feature = F.adaptive_avg_pool2d(feature, (64, 64))
+            processed_features.append(pooled_feature)
+
+            # 沿通道维度拼接所有池化后的特征图
+            # processed_features 是一个包含 5 个特征图的列表，每个形状为 [B, 64, 64, 64]
+            # 拼接后 concatenated_features 的形状将是 [B, 64 * 5, 64, 64] = [B, 320, 64, 64]
+        concatenated_features = torch.cat(processed_features, dim=1)
+
+        # 打印拼接后特征的形状，用于确认
+        # print(f"Concatenated features shape (BCHW): {concatenated_features.shape}")
+        cls = self.classification_head(concatenated_features)# shape: [B, num_shapes_per_location * num_classes, 64, 64]
+        bbox = self.bbox_head(concatenated_features)# shape: [B, num_shapes_per_location * 4, 64, 64]
+
+        B, C_cls, H, W = cls.shape  # H 和 W 都是 64
+        C_bbox = bbox.shape[1]
+        # Reshape classification output: [B, num_shapes_per_location * num_classes, H, W] -> [B, H*W*num_shapes_per_location, num_classes]
+        # Permute: [B, C_cls, H, W] -> [B, H, W, C_cls]
+        cls_output = cls.permute(0, 2, 3, 1).contiguous()
+        # View: [B, H, W, num_shapes_per_location * num_classes] -> [B, H*W*num_shapes_per_location, num_classes]
+        cls_output = cls_output.view(B, H * W * self.num_shapes_per_location, self.num_classes)
+
+        # Reshape bounding box output: [B, num_shapes_per_location * 4, H, W] -> [B, H*W*num_shapes_per_location, 4]
+        # Permute: [B, C_bbox, H, W] -> [B, H, W, C_bbox]
+        bbox_output = bbox.permute(0, 2, 3, 1).contiguous()
+        # View: [B, H, W, num_shapes_per_location * 4] -> [B, H*W*num_shapes_per_location, 4]
+        bbox_output = bbox_output.view(B, H * W * self.num_shapes_per_location, 4)
+
+        # --- Concatenate classification and bounding box predictions ---
+        # y_pred shape: [B, Num_Anchors, num_classes + 4]
+        y_pred = torch.cat([cls_output, bbox_output], dim=-1)
+
         return y_pred  #FP16
 
 
@@ -504,8 +532,6 @@ def testmodel():
         Pyin_channels=Pyin_channels,
         Pyout_channels=Pyout_channels,
         num_classes=num_classes,
-        num_anchors=num_anchors,
-        Netdepth=netdepth,
         device='cuda'
     )
     # model_test.half()

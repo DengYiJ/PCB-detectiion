@@ -22,11 +22,11 @@ SENT_LENGTH = 200  #文本长度
 # 模型参数
 EMBEDDING_SIZE = 300   #詞向量維度300
 VALIDATION_BATCH_SIZE=4
-TRAIN_BATCH_SIZE = 4   #训练批数大小
+TRAIN_BATCH_SIZE = 8   #训练批数大小
 TEST_BATCH_SIZE = 4    #测试批数大小
 LEARNING_RATE = 0.0001  #0.001  #学习率
 EPOCHS = 100   #训练周期
 Droprate=0.5
 Embeding_dim=96#96
 Netdepth=2
-Num_Anchors=10
+Num_Anchors=6*64*64
